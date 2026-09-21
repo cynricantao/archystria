@@ -60,23 +60,23 @@
         "actions": [
           {
             "label": "Lock",
-            "command": "/home/cynric/.config/hypr/scripts/session-action lock"
+            "command": "__USER_HOME__/.config/hypr/scripts/session-action lock"
           },
           {
             "label": "Suspend…",
-            "command": "/home/cynric/.config/hypr/scripts/session-action suspend"
+            "command": "__USER_HOME__/.config/hypr/scripts/session-action suspend"
           },
           {
             "label": "Log out…",
-            "command": "/home/cynric/.config/hypr/scripts/session-action logout"
+            "command": "__USER_HOME__/.config/hypr/scripts/session-action logout"
           },
           {
             "label": "Restart…",
-            "command": "/home/cynric/.config/hypr/scripts/session-action reboot"
+            "command": "__USER_HOME__/.config/hypr/scripts/session-action reboot"
           },
           {
             "label": "Shut down…",
-            "command": "/home/cynric/.config/hypr/scripts/session-action poweroff"
+            "command": "__USER_HOME__/.config/hypr/scripts/session-action poweroff"
           }
         ]
       }
@@ -88,8 +88,8 @@
           "label": "Bluetooth",
           "type": "toggle",
           "active": false,
-          "command": "sh -c '/home/cynric/.config/hypr/scripts/bluetooth-toggle \"$SWAYNC_TOGGLE_STATE\"'",
-          "update-command": "/home/cynric/.config/hypr/scripts/bluetooth-toggle status"
+          "command": "sh -c '__USER_HOME__/.config/hypr/scripts/bluetooth-toggle \"$SWAYNC_TOGGLE_STATE\"'",
+          "update-command": "__USER_HOME__/.config/hypr/scripts/bluetooth-toggle status"
         },
         {
           "label": "BT devices",
@@ -105,22 +105,22 @@
         },
         {
           "label": "Region shot",
-          "command": "/home/cynric/.config/hypr/scripts/screenshot region"
+          "command": "__USER_HOME__/.config/hypr/scripts/screenshot region"
         },
         {
           "label": "Full shot",
-          "command": "/home/cynric/.config/hypr/scripts/screenshot full"
+          "command": "__USER_HOME__/.config/hypr/scripts/screenshot full"
         },
         {
           "label": "Active shot",
-          "command": "/home/cynric/.config/hypr/scripts/screenshot active"
+          "command": "__USER_HOME__/.config/hypr/scripts/screenshot active"
         },
         {
           "label": "Record region",
           "type": "toggle",
           "active": false,
-          "command": "/home/cynric/.config/hypr/scripts/recording-toggle toggle region",
-          "update-command": "/home/cynric/.config/hypr/scripts/recording-toggle status"
+          "command": "__USER_HOME__/.config/hypr/scripts/recording-toggle toggle region",
+          "update-command": "__USER_HOME__/.config/hypr/scripts/recording-toggle status"
         }
       ]
     },

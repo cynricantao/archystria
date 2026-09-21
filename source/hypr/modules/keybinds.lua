@@ -2,7 +2,7 @@ local mod = "SUPER"
 local terminal = "ghostty"
 local file_manager = "nautilus --new-window"
 local browser = "firefox"
-local helper = "/home/cynric/.local/bin/"
+local helper = "__USER_HOME__/.local/bin/"
 
 local function bind(keys, dispatcher, description, options)
     options = options or {}

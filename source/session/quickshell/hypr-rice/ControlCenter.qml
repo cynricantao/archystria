@@ -90,7 +90,7 @@ Scope {
     }
 
     function backendAction(arguments: var): void {
-        actionProcess.exec(["/home/cynric/.local/bin/hypr-rice-panel-data"].concat(arguments));
+        actionProcess.exec(["__USER_HOME__/.local/bin/hypr-rice-panel-data"].concat(arguments));
     }
 
     function setDefaultAudio(node: var): void {
@@ -118,7 +118,7 @@ Scope {
     Process {
         id: backendStream
         running: true
-        command: ["/home/cynric/.local/bin/hypr-rice-panel-data", "stream"]
+        command: ["__USER_HOME__/.local/bin/hypr-rice-panel-data", "stream"]
         stdout: SplitParser {
             onRead: data => root.consumeBackendLine(data)
         }
@@ -150,7 +150,7 @@ Scope {
 
     Process {
         running: true
-        command: ["/usr/bin/test", "-x", "/home/cynric/.local/bin/hypr-rice-pavucontrol"]
+        command: ["/usr/bin/test", "-x", "__USER_HOME__/.local/bin/hypr-rice-pavucontrol"]
         onExited: (exitCode, exitStatus) => root.pavucontrolAvailable = exitCode === 0
     }
 
@@ -397,7 +397,7 @@ Scope {
                                 PanelButton {
                                     text: "󰌾  Lock"
                                     Layout.fillWidth: true
-                                    onClicked: Quickshell.execDetached(["/home/cynric/.config/hypr/scripts/session-action", "lock"])
+                                    onClicked: Quickshell.execDetached(["__USER_HOME__/.config/hypr/scripts/session-action", "lock"])
                                 }
                                 PanelButton {
                                     text: "󰒓  Menu Bar"
@@ -407,7 +407,7 @@ Scope {
                                 PanelButton {
                                     text: "󰐥  Power"
                                     Layout.fillWidth: true
-                                    onClicked: Quickshell.execDetached(["/home/cynric/.local/bin/hypr-rice-power-menu"])
+                                    onClicked: Quickshell.execDetached(["__USER_HOME__/.local/bin/hypr-rice-power-menu"])
                                 }
                             }
                         }
@@ -612,7 +612,7 @@ Scope {
                             PanelButton {
                                 text: "More Options"
                                 enabled: root.pavucontrolAvailable
-                                onClicked: Quickshell.execDetached(["/home/cynric/.local/bin/hypr-rice-pavucontrol"])
+                                onClicked: Quickshell.execDetached(["__USER_HOME__/.local/bin/hypr-rice-pavucontrol"])
                             }
                         }
 

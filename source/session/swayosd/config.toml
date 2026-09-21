@@ -1,5 +1,5 @@
 [server]
-style = "/home/cynric/.config/swayosd/style.css"
+style = "__USER_HOME__/.config/swayosd/style.css"
 top_margin = 0.86
 max_volume = 100
 show_percentage = true

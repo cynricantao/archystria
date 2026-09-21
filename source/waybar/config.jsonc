@@ -89,14 +89,14 @@
     "format": "{}",
     "tooltip": true,
     "return-type": "json",
-    "exec": "/home/cynric/.local/bin/hypr-rice-caffeinate status",
+    "exec": "__USER_HOME__/.local/bin/hypr-rice-caffeinate status",
     "interval": 2,
-    "on-click": "/home/cynric/.local/bin/hypr-rice-caffeinate toggle"
+    "on-click": "__USER_HOME__/.local/bin/hypr-rice-caffeinate toggle"
   },
   "custom/network": {
     "format": "{}",
     "return-type": "json",
-    "exec": "/home/cynric/.local/bin/hypr-rice-panel-data waybar-network",
+    "exec": "__USER_HOME__/.local/bin/hypr-rice-panel-data waybar-network",
     "interval": 5,
     "tooltip": true,
     "on-click": "/usr/bin/qs ipc -c hypr-rice call panels togglePerformance"
@@ -109,7 +109,7 @@
   },
   "custom/clock": {
     "return-type": "json",
-    "exec": "/home/cynric/.local/bin/hypr-rice-waybar-clock",
+    "exec": "__USER_HOME__/.local/bin/hypr-rice-waybar-clock",
     "restart-interval": 2,
     "escape": false,
     "on-click": "/usr/bin/qs ipc -c hypr-rice call panels toggleNotifications"
@@ -117,13 +117,13 @@
   "custom/power": {
     "format": "󰐥",
     "tooltip-format": "Session menu\nRight-click: lock",
-    "on-click": "/home/cynric/.local/bin/hypr-rice-power-menu",
+    "on-click": "__USER_HOME__/.local/bin/hypr-rice-power-menu",
     "on-click-right": "hyprlock"
   },
   "custom/weather": {
     "format": "{}",
     "return-type": "json",
-    "exec": "/home/cynric/.local/bin/hypr-rice-panel-data waybar-weather",
+    "exec": "__USER_HOME__/.local/bin/hypr-rice-panel-data waybar-weather",
     "interval": 900,
     "tooltip": true,
     "on-click": "/usr/bin/qs ipc -c hypr-rice call panels openControl weather"

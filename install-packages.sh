@@ -33,7 +33,7 @@ fi
 printf 'Installing %d explicitly requested packages from official Arch repositories.\n' "${#packages[@]}"
 pacman -Syu --needed "${packages[@]}"
 
-python /home/cynric/.local/share/hypr-rice/system/configure-root.py
+python "$(dirname "$0")/system/configure-root.py"
 
 systemctl enable NetworkManager.service
 systemctl enable bluetooth.service

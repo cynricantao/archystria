@@ -40,7 +40,12 @@ def copy(src: Path, dst: Path, mode: int | None = None) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.is_symlink() or dst.exists():
         dst.unlink()
-    shutil.copy2(src, dst)
+    data = src.read_bytes()
+    if b"__USER_HOME__" in data:
+        data = data.replace(b"__USER_HOME__", str(HOME).encode())
+        dst.write_bytes(data)
+    else:
+        shutil.copy2(src, dst)
     if mode is not None:
         dst.chmod(mode)
     written.append(str(dst))
@@ -51,7 +56,7 @@ def text(dst: Path, content: str, mode: int = 0o644) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.is_symlink() or dst.exists():
         dst.unlink()
-    dst.write_text(content)
+    dst.write_text(content.replace("__USER_HOME__", str(HOME)))
     dst.chmod(mode)
     written.append(str(dst))
 
@@ -115,7 +120,7 @@ copy(
 link(CONFIG / "fuzzel/fuzzel.ini", THEME / "generated/fuzzel.ini")
 text(
     CONFIG / "ghostty/config",
-    """font-family = JetBrainsMono Nerd Font\nfont-size = 11\ncommand = fish\nconfig-file = /home/cynric/.local/share/hypr-rice/theme/generated/ghostty.conf\n""",
+    """font-family = JetBrainsMono Nerd Font\nfont-size = 11\ncommand = fish\nconfig-file = __USER_HOME__/.local/share/hypr-rice/theme/generated/ghostty.conf\n""",
 )
 
 # GTK, Qt, icon, and cursor consistency. GTK 4/libadwaita gets its dark
@@ -123,7 +128,7 @@ text(
 # theme or gtk-application-prefer-dark-theme there emits libadwaita warnings.
 gtk3_settings = """[Settings]\ngtk-theme-name=adw-gtk3-dark\ngtk-icon-theme-name=Papirus-Dark\ngtk-font-name=Inter 10\ngtk-cursor-theme-name=capitaine-cursors\ngtk-cursor-theme-size=24\ngtk-application-prefer-dark-theme=1\n"""
 gtk4_settings = """[Settings]\ngtk-icon-theme-name=Papirus-Dark\ngtk-font-name=Inter 10\ngtk-cursor-theme-name=capitaine-cursors\ngtk-cursor-theme-size=24\n"""
-gtk_css = '@import url("/home/cynric/.local/share/hypr-rice/theme/generated/gtk.css");\n'
+gtk_css = '@import url("__USER_HOME__/.local/share/hypr-rice/theme/generated/gtk.css");\n'
 text(CONFIG / "gtk-3.0/settings.ini", gtk3_settings)
 text(CONFIG / "gtk-4.0/settings.ini", gtk4_settings)
 for version in ("gtk-3.0", "gtk-4.0"):

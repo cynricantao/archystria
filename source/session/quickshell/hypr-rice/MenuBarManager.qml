@@ -71,7 +71,7 @@ Scope {
         if (managerProcess.running)
             return;
         root.statusMessage = "Applying…";
-        managerProcess.exec(["/home/cynric/.local/bin/hypr-rice-waybar-manager"].concat(arguments));
+        managerProcess.exec(["__USER_HOME__/.local/bin/hypr-rice-waybar-manager"].concat(arguments));
     }
     function trayHidden(id) {
         return (root.menu.trayHidden || []).indexOf(id) >= 0;

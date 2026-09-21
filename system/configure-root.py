@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-SOURCE = Path('/home/cynric/.local/share/hypr-rice/system/greetd-config.toml')
+invoker = os.environ.get("SUDO_USER")
+if not invoker:
+    raise SystemExit("run via sudo so SUDO_USER identifies the target user")
+SOURCE = Path("/home") / invoker / ".local/share/hypr-rice/system/greetd-config.toml"
 TARGET = Path('/etc/greetd/config.toml')
 PAM = Path('/etc/pam.d/greetd')
 STAMP = datetime.now().strftime('%Y%m%d-%H%M%S')

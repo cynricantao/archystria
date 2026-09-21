@@ -105,7 +105,7 @@ for script in sorted((PROJECT / "theme/scripts").glob("*.sh")) + sorted((CFG / "
 command([sys.executable, "-m", "py_compile", str(PROJECT / "theme/scripts/keybind-cheatsheet.py")], "keybinding viewer Python parses")
 command([sys.executable, "-m", "py_compile", str(HOME / ".local/bin/hypr-rice-panel-data"), str(HOME / ".local/bin/hypr-rice-waybar-clock")], "panel helper Python parses")
 keybinds = (CFG / "hypr/modules/keybinds.lua").read_text()
-check('local helper = "/home/cynric/.local/bin/"' in keybinds and 'helper .. "hypr-rice-screenshot region"' in keybinds, "Print screenshot uses an absolute helper path")
+check(f'local helper = "{HOME}/.local/bin/"' in keybinds and 'helper .. "hypr-rice-screenshot region"' in keybinds, "Print screenshot uses an absolute helper path")
 check("hypr-rice-screenshot full" in keybinds and "hypr-rice-screenshot active" in keybinds, "full and active screenshot bindings exist")
 check("Screenshot-$(date +'%Y-%m-%d-%H-%M-%S').png" in (CFG / "hypr/scripts/screenshot").read_text(), "screenshot filename convention")
 

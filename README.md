@@ -25,7 +25,7 @@ systemctl --user daemon-reload
 
 Log out and back in through greetd. The first session applies the bundled Aurora Bloom wallpaper and generates the theme fragments.
 
-> Paths assume the user `cynric` at `/home/cynric` (absolute paths appear in QML/JSON configs). On a different username, replace `/home/cynric` across `source/` and `system/` before installing.
+> Configs use a `__USER_HOME__` placeholder for absolute paths (QML/JSON don't expand `~`); `install-user-files.py` substitutes your real home at install time, so any username works.
 
 ## Update
 
