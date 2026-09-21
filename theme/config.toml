@@ -1,0 +1,54 @@
+[config]
+version_check = false
+fallback_color = "#8b5cf6"
+prefer = "saturation"
+caching = false
+source_color_index = 0
+
+[config.wallpaper]
+set = false
+command = "true"
+
+[templates.waybar]
+input_path = "./templates/waybar.css"
+output_path = "./generated/waybar.css"
+
+[templates.swaync]
+input_path = "./templates/swaync.css"
+output_path = "./generated/swaync.css"
+
+[templates.swayosd]
+input_path = "./templates/swayosd.css"
+output_path = "./generated/swayosd.css"
+
+[templates.fuzzel]
+input_path = "./templates/fuzzel.ini"
+output_path = "./generated/fuzzel.ini"
+
+[templates.quickshell_theme]
+input_path = "./templates/quickshell-theme.qml"
+output_path = "./generated/quickshell-theme.qml"
+
+[templates.ghostty]
+input_path = "./templates/ghostty.conf"
+output_path = "./generated/ghostty.conf"
+
+[templates.hyprlock]
+input_path = "./templates/hyprlock.conf"
+output_path = "./generated/hyprlock.conf"
+
+[templates.hyprland_colors]
+input_path = "./templates/hyprland-colors.lua"
+output_path = "./generated/hyprland-colors.lua"
+
+[templates.gtk]
+input_path = "./templates/gtk.css"
+output_path = "./generated/gtk.css"
+
+[templates.fish_colors]
+input_path = "./templates/fish-colors.fish"
+output_path = "./generated/fish-colors.fish"
+
+[templates.starship]
+input_path = "./templates/starship.toml"
+output_path = "./generated/starship.toml"

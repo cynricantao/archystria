@@ -1,0 +1,20 @@
+#!/bin/sh
+# Launch only pavucontrol with the installed GTK 4 dark theme.
+set -eu
+
+THEME_NAME='adw-gtk3-dark'
+THEME="$THEME_NAME:dark"
+THEME_CSS="/usr/share/themes/$THEME_NAME/gtk-4.0/gtk.css"
+
+if [ ! -r "$THEME_CSS" ]; then
+    printf 'pavucontrol-dark: GTK 4 theme not found: %s\n' "$THEME_CSS" >&2
+    exit 1
+fi
+if ! command -v pavucontrol >/dev/null 2>&1; then
+    printf '%s\n' 'pavucontrol-dark: pavucontrol is not installed' >&2
+    exit 127
+fi
+
+GTK_THEME="$THEME"
+export GTK_THEME
+exec pavucontrol "$@"

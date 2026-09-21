@@ -1,0 +1,186 @@
+@import url("colors.css");
+
+:root {
+  --cc-bg: rgba(11, 15, 20, 0.96);
+  --noti-border-color: rgba(122, 162, 247, 0.28);
+  --noti-bg: 17, 24, 33;
+  --noti-bg-alpha: 0.96;
+  --noti-bg-darker: #0b0f14;
+  --noti-bg-hover: #18212c;
+  --noti-bg-focus: rgba(122, 162, 247, 0.20);
+  --noti-close-bg: rgba(230, 237, 243, 0.10);
+  --noti-close-bg-hover: rgba(247, 118, 142, 0.28);
+  --text-color: #e6edf3;
+  --text-color-disabled: #8b9bad;
+  --bg-selected: #7aa2f7;
+  --notification-icon-size: 52px;
+  --notification-group-icon-size: 28px;
+  --border: 1px solid rgba(122, 162, 247, 0.28);
+  --border-radius: 14px;
+  --font-size-body: 14px;
+  --font-size-summary: 15px;
+  --mpris-album-art-icon-size: 82px;
+  --widget-volume-row-icon-size: 22px;
+}
+
+* {
+  font-family: "Noto Sans", "DejaVu Sans", sans-serif;
+  color: @text;
+}
+
+notificationwindow,
+blankwindow,
+.blank-window,
+.floating-notifications {
+  background: transparent;
+}
+
+.notification-row .notification-background {
+  padding: 6px 10px;
+}
+
+.notification-row .notification-background .notification {
+  background: rgba(17, 24, 33, 0.97);
+  border: 1px solid @border;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.40);
+}
+
+.notification-row .notification-background .notification.critical {
+  border-color: @urgent;
+}
+
+.notification-row .notification-background .notification .notification-default-action,
+.notification-row .notification-background .notification .notification-action {
+  color: @text;
+  background: transparent;
+}
+
+.notification-row .notification-background .notification .notification-default-action:hover,
+.notification-row .notification-background .notification .notification-action:hover {
+  background: @panel_alt;
+}
+
+.notification-row .notification-background .notification .notification-default-action .notification-content .text-box .summary {
+  color: @text;
+  font-weight: 700;
+}
+
+.notification-row .notification-background .notification .notification-default-action .notification-content .text-box .body,
+.notification-row .notification-background .notification .notification-default-action .notification-content .text-box .time {
+  color: @muted;
+}
+
+.close-button {
+  background: rgba(230, 237, 243, 0.08);
+  color: @text;
+  border: none;
+  border-radius: 999px;
+  box-shadow: none;
+}
+
+.close-button:hover {
+  background: rgba(247, 118, 142, 0.28);
+}
+
+.control-center {
+  background: rgba(11, 15, 20, 0.97);
+  color: @text;
+  border: 1px solid @border;
+  border-radius: 18px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.52);
+}
+
+.control-center .control-center-list-placeholder {
+  color: @muted;
+  opacity: 0.8;
+}
+
+.widget {
+  margin: 8px;
+  padding: 10px;
+  background: @panel;
+  border: 1px solid @border;
+  border-radius: 14px;
+}
+
+.widget-title > label,
+.widget-inhibitors > label {
+  color: @text;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.widget-title > button,
+.widget-inhibitors > button,
+.widget-menubar button,
+.widget-buttons-grid flowboxchild > button {
+  min-height: 36px;
+  background: @panel_alt;
+  color: @text;
+  border: 1px solid @border;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.widget-title > button:hover,
+.widget-inhibitors > button:hover,
+.widget-menubar button:hover,
+.widget-buttons-grid flowboxchild > button:hover {
+  background: @accent_soft;
+  border-color: @accent;
+}
+
+.widget-buttons-grid flowboxchild > button.toggle:checked {
+  background: @accent;
+  color: @bg;
+  border-color: @accent;
+}
+
+.widget-dnd label {
+  color: @text;
+  font-weight: 600;
+}
+
+.widget-dnd switch {
+  background: @panel_alt;
+  border: 1px solid @border;
+  border-radius: 999px;
+}
+
+.widget-dnd switch:checked {
+  background: @accent;
+}
+
+.widget-dnd switch slider {
+  background: @text;
+  border-radius: 999px;
+}
+
+.widget-volume scale trough,
+.widget-volume scale highlight {
+  border-radius: 999px;
+}
+
+.widget-volume scale trough {
+  background: @panel_alt;
+  min-height: 8px;
+}
+
+.widget-volume scale highlight {
+  background: @accent;
+}
+
+.widget-mpris .widget-mpris-player {
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.widget-mpris .widget-mpris-player .mpris-overlay {
+  background: rgba(11, 15, 20, 0.72);
+  border-radius: 12px;
+}
+
+.widget-menubar > revealer * button:last-child {
+  color: @urgent;
+}

@@ -1,0 +1,19 @@
+/* AI usage: permanent compact affordance; status never controls visibility. */
+#custom-ai-usage {
+  min-width: 18px;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 6px;
+  font-family: "Symbols Nerd Font", "Inter";
+  font-size: 14px;
+  color: @primary;
+  background-color: transparent;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+#custom-ai-usage:hover {
+  color: @on_surface;
+  background-color: alpha(@surface_bright, 0.52);
+}
+#custom-ai-usage.stale, #custom-ai-usage.error {
+  color: @warning;
+}

@@ -1,0 +1,2055 @@
+#!/usr/bin/env python3
+"""Lightweight JSON backend for the Hyprland control-center panels.
+
+The long-running ``stream`` command emits one newline-delimited JSON snapshot per
+second.  Mutating commands are deliberately narrow, use argument vectors (never
+a shell), and persist state with atomic replacements.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import socket
+import ssl
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any, Callable, Sequence
+import urllib.error
+import urllib.parse
+import urllib.request
+
+COMMAND_TIMEOUT = 5
+WEATHER_CACHE_SECONDS = 30 * 60
+WEATHER_TIMEOUT = 7
+MAX_HTTP_BYTES = 2 * 1024 * 1024
+VPN_TYPES = {"vpn", "wireguard"}
+PHYSICAL_TYPES = {"ethernet", "wifi"}
+MAC_PATTERN = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+MENU_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
+
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "schema_version": 1,
+    "dnd": False,
+    "weather": {
+        "city": "",
+        "name": "",
+        "country": "",
+        "latitude": None,
+        "longitude": None,
+        "timezone": "auto",
+    },
+    "menu": {
+        "compactness": "normal",
+        "modules": {
+            "active_application": True,
+            "tray": True,
+            "network": True,
+            "caffeinate": True,
+            "media": True,
+            "microphone": False,
+            "battery": False,
+            "weather": False,
+            "updates": False,
+            "control_center": True,
+        },
+        "order": {
+            "left": ["launcher", "workspaces", "active_application"],
+            "center": [],
+            "right": ["media", "tray", "caffeinate", "network", "control_center", "clock", "power"],
+        },
+        "tray_hidden": [],
+    },
+}
+
+MENU_ID_TO_BAR = {
+    "active_application": "activeApp",
+    "control_center": "controlCenter",
+}
+
+
+def menu_alias_from_bar(menu_bar: dict[str, Any]) -> dict[str, Any]:
+    """Return the backend's compatibility view of Waybar settings."""
+    alias = copy.deepcopy(DEFAULT_SETTINGS["menu"])
+    density = menu_bar.get("density")
+    if density in {"compact", "normal", "relaxed"}:
+        alias["compactness"] = density
+    modules = menu_bar.get("modules")
+    if isinstance(modules, dict):
+        reverse_ids = {value: key for key, value in MENU_ID_TO_BAR.items()}
+        for key, value in modules.items():
+            alias["modules"][reverse_ids.get(key, key)] = bool(value)
+    order = menu_bar.get("rightOrder")
+    if isinstance(order, list):
+        reverse_ids = {value: key for key, value in MENU_ID_TO_BAR.items()}
+        alias["order"]["right"] = [reverse_ids.get(item, item) for item in order if isinstance(item, str)]
+    hidden = menu_bar.get("trayHidden")
+    if isinstance(hidden, list):
+        alias["tray_hidden"] = [item for item in hidden if isinstance(item, str)]
+    return alias
+
+
+def menu_bar_from_alias(menu: dict[str, Any], existing: Any = None) -> dict[str, Any]:
+    """Merge a compatibility menu mutation into the authoritative Waybar tree."""
+    result = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    result["density"] = menu.get("compactness", result.get("density", "normal"))
+    modules = result.get("modules") if isinstance(result.get("modules"), dict) else {}
+    for key, value in (menu.get("modules") or {}).items():
+        modules[MENU_ID_TO_BAR.get(key, key)] = bool(value)
+    result["modules"] = modules
+    right = (menu.get("order") or {}).get("right")
+    if isinstance(right, list):
+        result["rightOrder"] = [MENU_ID_TO_BAR.get(item, item) for item in right]
+    hidden = menu.get("tray_hidden")
+    if isinstance(hidden, list):
+        result["trayHidden"] = [item for item in hidden if isinstance(item, str)]
+    return result
+
+
+WEATHER_CODES: dict[int, tuple[str, str]] = {
+    0: ("Clear sky", "weather-clear"),
+    1: ("Mainly clear", "weather-clear"),
+    2: ("Partly cloudy", "weather-few-clouds"),
+    3: ("Overcast", "weather-overcast"),
+    45: ("Fog", "weather-fog"),
+    48: ("Rime fog", "weather-fog"),
+    51: ("Light drizzle", "weather-showers-scattered"),
+    53: ("Drizzle", "weather-showers-scattered"),
+    55: ("Heavy drizzle", "weather-showers"),
+    56: ("Freezing drizzle", "weather-freezing-rain"),
+    57: ("Heavy freezing drizzle", "weather-freezing-rain"),
+    61: ("Light rain", "weather-showers-scattered"),
+    63: ("Rain", "weather-showers"),
+    65: ("Heavy rain", "weather-showers"),
+    66: ("Freezing rain", "weather-freezing-rain"),
+    67: ("Heavy freezing rain", "weather-freezing-rain"),
+    71: ("Light snow", "weather-snow-scattered"),
+    73: ("Snow", "weather-snow"),
+    75: ("Heavy snow", "weather-snow"),
+    77: ("Snow grains", "weather-snow-scattered"),
+    80: ("Light showers", "weather-showers-scattered"),
+    81: ("Showers", "weather-showers"),
+    82: ("Heavy showers", "weather-showers"),
+    85: ("Snow showers", "weather-snow-scattered"),
+    86: ("Heavy snow showers", "weather-snow"),
+    95: ("Thunderstorm", "weather-storm"),
+    96: ("Thunderstorm with hail", "weather-storm"),
+    99: ("Severe thunderstorm", "weather-storm"),
+}
+
+
+class HelperError(RuntimeError):
+    """An operational error safe to display in the panel."""
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+
+def cache_home() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+
+
+def state_home() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+
+
+def runtime_home() -> Path:
+    value = os.environ.get("XDG_RUNTIME_DIR")
+    return Path(value) if value else state_home() / "hypr-shell"
+
+
+def read_text_file(path: Path | str) -> str:
+    return Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def atomic_write_json(path: Path, payload: Any, *, mode: int = 0o600) -> None:
+    """Durably replace a JSON file without exposing a partial document."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = -1
+    temporary = ""
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def run(command: Sequence[str], *, timeout: float = COMMAND_TIMEOUT) -> str:
+    """Run a fixed argument vector with a bounded execution time."""
+    if not command:
+        raise ValueError("empty command")
+    try:
+        completed = subprocess.run(
+            list(command), check=False, capture_output=True, text=True,
+            timeout=timeout, stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise HelperError(f"{command[0]} is not installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HelperError(f"{command[0]} timed out") from exc
+    except OSError as exc:
+        raise HelperError(f"unable to run {command[0]}") from exc
+    if completed.returncode != 0:
+        raise HelperError(f"{command[0]} failed (exit {completed.returncode})")
+    return completed.stdout
+
+
+def split_escaped(record: str, separator: str = ":") -> list[str]:
+    fields: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for character in record:
+        if escaped:
+            current.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == separator:
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+    if escaped:
+        current.append("\\")
+    fields.append("".join(current))
+    return fields
+
+
+def address_without_prefix(value: str) -> str:
+    try:
+        return str(ipaddress.ip_interface(value).ip)
+    except ValueError:
+        return value
+
+
+def nmcli(*args: str) -> str:
+    return run(("nmcli", "--terse", "--escape", "yes", "--colors", "no", *args))
+
+
+def default_route_interface(route_path: Path = Path("/proc/net/route")) -> str | None:
+    try:
+        lines = read_text_file(route_path).splitlines()[1:]
+    except OSError:
+        return None
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        try:
+            flags = int(fields[3], 16)
+        except ValueError:
+            continue
+        if fields[1] == "00000000" and flags & 0x2:
+            return fields[0]
+    return None
+
+
+def _parse_link_speed(value: str) -> int | None:
+    match = re.search(r"([0-9]+)", value)
+    if not match:
+        return None
+    speed = int(match.group(1))
+    return speed if speed > 0 else None
+
+
+def link_speed_mbps(interface: str) -> int | None:
+    """Read a physical interface's negotiated link speed from sysfs."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", interface):
+        return None
+    raw = _read_optional(Path("/sys/class/net") / interface / "speed")
+    return _parse_link_speed(raw) if raw is not None else None
+
+
+def network_payload(
+    *,
+    nmcli_func: Callable[..., str] = nmcli,
+    default_interface: str | None | object = ...,
+    link_speed_func: Callable[[str], int | None] = link_speed_mbps,
+) -> dict[str, Any]:
+    """Return active physical network details and configured VPN profiles."""
+    if default_interface is ...:
+        default_interface = default_route_interface()
+    devices_output = nmcli_func(
+        "--fields", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"
+    )
+    candidates: list[tuple[str, str, str, str]] = []
+    for line in devices_output.splitlines():
+        fields = split_escaped(line)
+        if len(fields) >= 4 and fields[1] in PHYSICAL_TYPES and fields[2].startswith("connected"):
+            candidates.append((fields[0], fields[1], fields[2], fields[3]))
+
+    def priority(item: tuple[str, str, str, str]) -> tuple[int, int, str]:
+        return (
+            0 if default_interface and item[0] == default_interface else 1,
+            0 if item[1] == "ethernet" else 1,
+            item[0],
+        )
+
+    active = min(candidates, key=priority) if candidates else None
+    result: dict[str, Any] = {
+        "connected": active is not None,
+        "state": active[2] if active else "disconnected",
+        "type": active[1] if active else None,
+        "interface": active[0] if active else None,
+        "connection": active[3] if active else None,
+        "ipv4": None,
+        "vpns": [],
+        "connectivity": "unknown",
+    }
+    if active:
+        details = nmcli_func(
+            "--fields", "IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP6.ADDRESS",
+            "device", "show", active[0],
+        )
+        dns: list[str] = []
+        for line in details.splitlines():
+            fields = split_escaped(line)
+            if len(fields) < 2:
+                continue
+            key, value = fields[0], ":".join(fields[1:])
+            if key.startswith("IP4.ADDRESS") and result["ipv4"] is None:
+                result["ipv4"] = address_without_prefix(value)
+            elif key == "IP4.GATEWAY" and value:
+                result["gateway"] = value
+            elif key.startswith("IP4.DNS") and value:
+                dns.append(value)
+            elif key.startswith("IP6.ADDRESS") and value and "ipv6" not in result:
+                result["ipv6"] = address_without_prefix(value)
+        if dns:
+            result["dns"] = dns
+        speed = link_speed_func(active[0])
+        if speed is not None:
+            result["link_speed_mbps"] = speed
+
+    profiles = nmcli_func(
+        "--fields", "NAME,TYPE,DEVICE,STATE", "connection", "show"
+    )
+    vpns: list[dict[str, Any]] = []
+    for line in profiles.splitlines():
+        fields = split_escaped(line)
+        if len(fields) >= 4 and fields[1] in VPN_TYPES:
+            vpns.append({
+                "name": fields[0],
+                "state": fields[3],
+                "active": fields[3] in {"activated", "activating"},
+            })
+    result["vpns"] = sorted(vpns, key=lambda item: str(item["name"]).casefold())
+    try:
+        connectivity = nmcli_func("networking", "connectivity").strip().lower()
+        if connectivity in {"none", "portal", "limited", "full", "unknown"}:
+            result["connectivity"] = connectivity
+    except HelperError:
+        pass
+    return result
+
+
+def validate_profile_name(name: str) -> None:
+    if (
+        not name or len(name) > 128 or name.startswith("-")
+        or any(not character.isprintable() for character in name)
+    ):
+        raise ValueError("invalid VPN profile name")
+
+
+def vpn_profile_names() -> set[str]:
+    output = nmcli("--fields", "NAME,TYPE,DEVICE,STATE", "connection", "show")
+    names: set[str] = set()
+    for line in output.splitlines():
+        fields = split_escaped(line)
+        if len(fields) >= 2 and fields[1] in VPN_TYPES:
+            names.add(fields[0])
+    return names
+
+
+def set_vpn(action: str, name: str) -> dict[str, str]:
+    if action not in {"up", "down"}:
+        raise ValueError("VPN action must be up or down")
+    validate_profile_name(name)
+    if name not in vpn_profile_names():
+        raise HelperError("VPN profile not found")
+    run(
+        ("nmcli", "--wait", "10", "--colors", "no", "connection", action, "id", name),
+        timeout=12,
+    )
+    return {"name": name, "state": action}
+
+
+class CpuSampler:
+    def __init__(
+        self,
+        *,
+        read_text: Callable[[Path | str], str] = read_text_file,
+        stat_path: Path = Path("/proc/stat"),
+    ) -> None:
+        self.read_text = read_text
+        self.stat_path = stat_path
+        self.previous: tuple[int, int] | None = None
+
+    def sample(self) -> dict[str, Any]:
+        line = self.read_text(self.stat_path).splitlines()[0]
+        fields = line.split()
+        if not fields or fields[0] != "cpu":
+            raise HelperError("CPU statistics unavailable")
+        try:
+            values = [int(value) for value in fields[1:]]
+        except ValueError as exc:
+            raise HelperError("invalid CPU statistics") from exc
+        if len(values) < 4:
+            raise HelperError("incomplete CPU statistics")
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        # guest and guest_nice are already included in user and nice.
+        total = sum(values[:8])
+        usage: float | None = None
+        if self.previous is not None:
+            total_delta = total - self.previous[0]
+            idle_delta = idle - self.previous[1]
+            if total_delta > 0 and 0 <= idle_delta <= total_delta:
+                usage = round((total_delta - idle_delta) * 100.0 / total_delta, 1)
+        self.previous = (total, idle)
+        return {"usage_percent": usage}
+
+
+def cpu_details() -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    try:
+        text = read_text_file("/proc/cpuinfo")
+    except OSError:
+        text = ""
+    frequencies: list[float] = []
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = (part.strip() for part in line.split(":", 1))
+        if key in {"model name", "Hardware", "Processor"} and "model" not in result and value:
+            result["model"] = value
+        elif key == "cpu MHz":
+            try:
+                frequencies.append(float(value))
+            except ValueError:
+                pass
+    if frequencies:
+        result["frequency_mhz"] = round(sum(frequencies) / len(frequencies), 1)
+    try:
+        one, five, fifteen = os.getloadavg()
+        result["load_average"] = [round(one, 2), round(five, 2), round(fifteen, 2)]
+    except OSError:
+        pass
+    temperatures: list[float] = []
+    thermal_root = Path("/sys/class/thermal")
+    try:
+        zones = list(thermal_root.glob("thermal_zone*/temp"))
+    except OSError:
+        zones = []
+    for path in zones:
+        try:
+            value = float(read_text_file(path).strip()) / 1000.0
+        except (OSError, ValueError):
+            continue
+        if -20 <= value <= 150:
+            temperatures.append(value)
+    if temperatures:
+        result["temperature_c"] = round(max(temperatures), 1)
+    return result
+
+
+def memory_payload(text: str | None = None) -> dict[str, Any]:
+    if text is None:
+        try:
+            text = read_text_file("/proc/meminfo")
+        except OSError as exc:
+            raise HelperError("memory statistics unavailable") from exc
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        fields = line.replace(":", "").split()
+        if len(fields) >= 2:
+            try:
+                values[fields[0]] = int(fields[1]) * 1024
+            except ValueError:
+                continue
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable")
+    if not total or available is None:
+        raise HelperError("incomplete memory statistics")
+    used = max(0, total - available)
+    result: dict[str, Any] = {
+        "total_bytes": total,
+        "used_bytes": used,
+        "available_bytes": available,
+        "cached_bytes": values.get("Cached", 0) + values.get("SReclaimable", 0),
+        "usage_percent": round(used * 100.0 / total, 1),
+    }
+    swap_total = values.get("SwapTotal", 0)
+    if swap_total:
+        swap_used = max(0, swap_total - values.get("SwapFree", 0))
+        result.update({
+            "swap_total_bytes": swap_total,
+            "swap_used_bytes": swap_used,
+            "swap_usage_percent": round(swap_used * 100.0 / swap_total, 1),
+        })
+    return result
+
+
+def parse_net_dev(text: str) -> dict[str, tuple[int, int]]:
+    counters: dict[str, tuple[int, int]] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        interface, raw = line.split(":", 1)
+        fields = raw.split()
+        if len(fields) < 9:
+            continue
+        try:
+            counters[interface.strip()] = (int(fields[0]), int(fields[8]))
+        except ValueError:
+            continue
+    return counters
+
+
+class NetworkRateSampler:
+    def __init__(
+        self,
+        *,
+        read_text: Callable[[Path | str], str] = read_text_file,
+        clock: Callable[[], float] = time.monotonic,
+        path: Path = Path("/proc/net/dev"),
+    ) -> None:
+        self.read_text = read_text
+        self.clock = clock
+        self.path = path
+        self.previous: dict[str, tuple[int, int, float]] = {}
+
+    def sample(self, interface: str | None) -> dict[str, float | None]:
+        unavailable = {"rx_bytes_per_second": None, "tx_bytes_per_second": None}
+        if not interface:
+            return unavailable
+        try:
+            counters = parse_net_dev(self.read_text(self.path))
+        except OSError as exc:
+            raise HelperError("network counters unavailable") from exc
+        if interface not in counters:
+            return unavailable
+        now = self.clock()
+        received, transmitted = counters[interface]
+        previous = self.previous.get(interface)
+        self.previous[interface] = (received, transmitted, now)
+        if previous is None:
+            return unavailable
+        elapsed = now - previous[2]
+        rx_delta = received - previous[0]
+        tx_delta = transmitted - previous[1]
+        if elapsed <= 0 or rx_delta < 0 or tx_delta < 0:
+            return unavailable
+        return {
+            "rx_bytes_per_second": round(rx_delta / elapsed, 1),
+            "tx_bytes_per_second": round(tx_delta / elapsed, 1),
+        }
+
+
+def _optional_number(value: str, *, multiplier: float = 1.0) -> float | None:
+    value = value.strip()
+    if not value or value.upper() in {"N/A", "NA", "[NOT SUPPORTED]"}:
+        return None
+    try:
+        number = float(value) * multiplier
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def nvidia_gpu_payload(line: str) -> dict[str, Any]:
+    fields = [field.strip() for field in line.strip().split(",")]
+    if len(fields) < 6:
+        raise HelperError("invalid nvidia-smi response")
+    result: dict[str, Any] = {"vendor": "NVIDIA", "name": fields[0] or "NVIDIA GPU"}
+    mappings = (
+        ("usage_percent", fields[1], 1.0),
+        ("vram_used_bytes", fields[2], 1024.0 * 1024.0),
+        ("vram_total_bytes", fields[3], 1024.0 * 1024.0),
+        ("temperature_c", fields[4], 1.0),
+        ("power_watts", fields[5], 1.0),
+    )
+    for key, raw, multiplier in mappings:
+        number = _optional_number(raw, multiplier=multiplier)
+        if number is not None:
+            result[key] = round(number, 1) if key not in {"vram_used_bytes", "vram_total_bytes"} else int(number)
+    return result
+
+
+def nvidia_gpus() -> list[dict[str, Any]]:
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        return []
+    output = run((
+        executable,
+        "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+        "--format=csv,noheader,nounits",
+    ), timeout=3)
+    return [nvidia_gpu_payload(line) for line in output.splitlines() if line.strip()]
+
+
+def _read_optional(path: Path) -> str | None:
+    try:
+        return read_text_file(path).strip()
+    except OSError:
+        return None
+
+
+def _sysfs_number(path: Path, *, divisor: float = 1.0) -> float | None:
+    raw = _read_optional(path)
+    if raw is None:
+        return None
+    try:
+        number = float(raw) / divisor
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def sysfs_gpus(drm_root: Path = Path("/sys/class/drm")) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen_devices: set[str] = set()
+    try:
+        cards = sorted(drm_root.glob("card[0-9]*"), key=lambda path: path.name)
+    except OSError:
+        return result
+    for card in cards:
+        device = card / "device"
+        vendor_id = (_read_optional(device / "vendor") or "").lower()
+        vendor = {"0x1002": "AMD", "0x8086": "Intel", "0x10de": "NVIDIA"}.get(vendor_id)
+        if not vendor:
+            continue
+        try:
+            identity = str(device.resolve())
+        except OSError:
+            identity = str(device)
+        if identity in seen_devices:
+            continue
+        seen_devices.add(identity)
+        uevent = _read_optional(device / "uevent") or ""
+        details = dict(
+            line.split("=", 1) for line in uevent.splitlines() if "=" in line
+        )
+        pci_id = details.get("PCI_ID")
+        driver = details.get("DRIVER")
+        name_parts = [vendor]
+        if driver:
+            name_parts.append(driver)
+        if pci_id:
+            name_parts.append(pci_id)
+        gpu: dict[str, Any] = {
+            "vendor": vendor,
+            "name": " ".join(name_parts) + " GPU",
+            "device": card.name,
+        }
+        usage = _sysfs_number(device / "gpu_busy_percent")
+        if usage is not None and 0 <= usage <= 100:
+            gpu["usage_percent"] = round(usage, 1)
+        vram_total = _sysfs_number(device / "mem_info_vram_total")
+        vram_used = _sysfs_number(device / "mem_info_vram_used")
+        if vram_total is not None and vram_total >= 0:
+            gpu["vram_total_bytes"] = int(vram_total)
+        if vram_used is not None and vram_used >= 0:
+            gpu["vram_used_bytes"] = int(vram_used)
+        try:
+            hwmons = sorted((device / "hwmon").glob("hwmon*"))
+        except OSError:
+            hwmons = []
+        for hwmon in hwmons:
+            temperature = _sysfs_number(hwmon / "temp1_input", divisor=1000.0)
+            if temperature is not None and -20 <= temperature <= 150:
+                gpu["temperature_c"] = round(temperature, 1)
+                break
+        for hwmon in hwmons:
+            power = _sysfs_number(hwmon / "power1_average", divisor=1_000_000.0)
+            if power is not None and power >= 0:
+                gpu["power_watts"] = round(power, 1)
+                break
+        result.append(gpu)
+    return result
+
+
+def gpu_payloads() -> list[dict[str, Any]]:
+    try:
+        nvidia = nvidia_gpus()
+    except HelperError:
+        nvidia = []
+    sysfs = sysfs_gpus()
+    if nvidia:
+        sysfs = [gpu for gpu in sysfs if gpu.get("vendor") != "NVIDIA"]
+    return nvidia + sysfs
+
+
+def bluetoothctl(*args: str, timeout: float = COMMAND_TIMEOUT) -> str:
+    return run(("bluetoothctl", *args), timeout=timeout)
+
+
+def _parse_bluetooth_devices(output: str) -> dict[str, str]:
+    devices: dict[str, str] = {}
+    for line in output.splitlines():
+        match = re.match(r"^Device\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(.+)$", line.strip())
+        if match:
+            devices[match.group(1).upper()] = match.group(2).strip()
+    return devices
+
+
+def bluetooth_payload(command: Callable[..., str] = bluetoothctl) -> dict[str, Any]:
+    try:
+        controller = command("show")
+    except HelperError as exc:
+        return {"available": False, "powered": False, "devices": [], "error": str(exc)}
+    powered_match = re.search(r"^\s*Powered:\s*(yes|no)\s*$", controller, re.MULTILINE)
+    discovering_match = re.search(r"^\s*Discovering:\s*(yes|no)\s*$", controller, re.MULTILINE)
+    controller_match = re.search(r"^Controller\s+([^\s]+)(?:\s+(.+))?$", controller, re.MULTILINE)
+    alias_match = re.search(r"^\s*Alias:\s*(.+?)\s*$", controller, re.MULTILINE)
+    name_match = re.search(r"^\s*Name:\s*(.+?)\s*$", controller, re.MULTILINE)
+    result: dict[str, Any] = {
+        "available": True,
+        "powered": bool(powered_match and powered_match.group(1) == "yes"),
+        "discovering": bool(discovering_match and discovering_match.group(1) == "yes"),
+        "devices": [],
+    }
+    if controller_match:
+        controller_name = (alias_match.group(1).strip() if alias_match else
+                           name_match.group(1).strip() if name_match else
+                           (controller_match.group(2) or "").strip())
+        if controller_name.startswith("(") and controller_name.endswith(")"):
+            controller_name = ""
+        result["controller"] = {
+            "address": controller_match.group(1),
+            "name": controller_name or None,
+        }
+    try:
+        all_devices = _parse_bluetooth_devices(command("devices"))
+    except HelperError:
+        all_devices = {}
+    try:
+        paired = _parse_bluetooth_devices(command("devices", "Paired"))
+    except HelperError:
+        paired = {}
+    try:
+        connected = _parse_bluetooth_devices(command("devices", "Connected"))
+    except HelperError:
+        connected = {}
+    merged = dict(all_devices)
+    merged.update(paired)
+    merged.update(connected)
+    result["devices"] = [
+        {
+            "address": address,
+            "name": merged[address],
+            "paired": address in paired,
+            "connected": address in connected,
+        }
+        for address in sorted(merged, key=lambda item: merged[item].casefold())
+    ]
+    result["connected_count"] = len(connected)
+    return result
+
+
+def validate_mac(address: str) -> str:
+    if not MAC_PATTERN.fullmatch(address):
+        raise ValueError("invalid Bluetooth device address")
+    return address.upper()
+
+
+def bluetooth_action(action: str, target: str | None = None) -> dict[str, Any]:
+    if action in {"connect", "disconnect"}:
+        if target is None:
+            raise ValueError(f"Bluetooth {action} requires a device address")
+        address = validate_mac(target)
+        run(("bluetoothctl", action, address), timeout=18)
+        return {"action": action, "address": address}
+    if action == "power":
+        if target not in {"on", "off", "toggle"}:
+            raise ValueError("Bluetooth power requires on, off, or toggle")
+        state = target
+        if state == "toggle":
+            state = "off" if bluetooth_payload().get("powered") else "on"
+        run(("bluetoothctl", "power", state), timeout=10)
+        return {"action": "power", "powered": state == "on"}
+    if action == "scan":
+        state = target or "start"
+        if state in {"start", "on"}:
+            run(("bluetoothctl", "--timeout", "8", "scan", "on"), timeout=10)
+            return {"action": "scan", "scanning": True, "duration_seconds": 8}
+        if state in {"stop", "off"}:
+            run(("bluetoothctl", "scan", "off"), timeout=5)
+            return {"action": "scan", "scanning": False}
+        raise ValueError("Bluetooth scan requires start or stop")
+    raise ValueError("unsupported Bluetooth action")
+
+
+def decode_preference(value: object) -> object:
+    if not isinstance(value, str) or len(value) < 2 or value[1] != "~":
+        return value
+    prefix, raw = value[0], value[2:]
+    if prefix == "S":
+        return raw
+    if prefix == "I":
+        try:
+            return int(raw)
+        except ValueError:
+            return value
+    if prefix == "B":
+        return raw.lower() == "true"
+    return value
+
+
+def localsend_preferences() -> dict[str, object]:
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    candidates = (
+        data / "org.localsend.localsend_app/shared_preferences.json",
+        data / "org.localsend.localsend_app/settings.json",
+        Path.home() / ".config/LocalSend/settings.json",
+        Path("/opt/localsend/settings.json"),
+    )
+    for path in candidates:
+        try:
+            raw = json.loads(read_text_file(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(raw, dict):
+            return {str(key): decode_preference(value) for key, value in raw.items()}
+    return {}
+
+
+def localsend_process_running() -> bool:
+    try:
+        entries = Path("/proc").iterdir()
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = read_text_file(entry / "comm").strip()
+            executable = (entry / "exe").resolve().name
+        except OSError:
+            continue
+        if command in {"localsend", "localsend_app"} or executable in {"localsend", "localsend_app"}:
+            return True
+    return False
+
+
+def routed_ip() -> str | None:
+    try:
+        routes = json.loads(run(("ip", "-json", "route", "get", "1.1.1.1"), timeout=2))
+    except (HelperError, json.JSONDecodeError):
+        return None
+    if isinstance(routes, list) and routes and isinstance(routes[0], dict):
+        source = routes[0].get("prefsrc") or routes[0].get("src")
+        return source if isinstance(source, str) else None
+    return None
+
+
+def localsend_api(port: int, https: bool) -> dict[str, object] | None:
+    scheme = "https" if https else "http"
+    url = f"{scheme}://127.0.0.1:{port}/api/localsend/v2/info"
+    try:
+        if https:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context)
+            )
+        else:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url, timeout=0.75) as response:
+            payload = json.loads(response.read(65536))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def localsend_listener_ready(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def localsend_payload() -> dict[str, object]:
+    prefs = localsend_preferences()
+    alias: str | None = None
+    for key in ("flutter.ls_alias", "ls_alias", "alias", "deviceAlias"):
+        value = prefs.get(key)
+        if isinstance(value, str) and value:
+            alias = value
+            break
+    raw_port = prefs.get("flutter.ls_port", prefs.get("ls_port", 53317))
+    port = raw_port if type(raw_port) is int and 1 <= raw_port <= 65535 else 53317
+    raw_https = prefs.get("flutter.ls_https", prefs.get("ls_https", True))
+    https = raw_https if isinstance(raw_https, bool) else True
+    ready = localsend_listener_ready(port)
+    # LocalSend's HTTPS endpoint commonly requests a client certificate.  A TCP
+    # readiness probe preserves the established behavior without weakening TLS.
+    live = localsend_api(port, https) if ready and not https else None
+    if live and isinstance(live.get("alias"), str):
+        alias = str(live["alias"])
+        alias_source: str | None = "live"
+    else:
+        alias_source = "persisted" if alias else None
+    return {
+        "process_running": localsend_process_running(),
+        "ready": ready,
+        "alias": alias,
+        "alias_source": alias_source,
+        "ip": routed_ip(),
+    }
+
+
+def open_localsend() -> dict[str, bool]:
+    try:
+        subprocess.Popen(
+            ("gtk-launch", "localsend"), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True,
+        )
+    except OSError as exc:
+        raise HelperError("unable to launch LocalSend") from exc
+    return {"launched": True}
+
+
+def _merge_known(default: Any, supplied: Any) -> Any:
+    if isinstance(default, dict):
+        source = supplied if isinstance(supplied, dict) else {}
+        return {key: _merge_known(value, source.get(key)) for key, value in default.items()}
+    if supplied is None:
+        return copy.deepcopy(default)
+    if isinstance(default, bool):
+        return supplied if isinstance(supplied, bool) else default
+    if isinstance(default, list):
+        return copy.deepcopy(supplied) if isinstance(supplied, list) else copy.deepcopy(default)
+    if isinstance(default, str):
+        return supplied if isinstance(supplied, str) else default
+    if isinstance(default, (int, float)):
+        return supplied if isinstance(supplied, (int, float)) and not isinstance(supplied, bool) else default
+    return copy.deepcopy(supplied)
+
+
+def _public_settings(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return copy.deepcopy(DEFAULT_SETTINGS)
+    result = copy.deepcopy(DEFAULT_SETTINGS)
+    result["dnd"] = raw.get("dnd") if isinstance(raw.get("dnd"), bool) else False
+    weather = raw.get("weather") if isinstance(raw.get("weather"), dict) else {}
+    for key in result["weather"]:
+        value = weather.get(key)
+        if key in {"latitude", "longitude"}:
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                result["weather"][key] = float(value)
+        elif isinstance(value, str):
+            result["weather"][key] = value
+    menu_bar = raw.get("menuBar")
+    menu = raw.get("menu")
+    if isinstance(menu_bar, dict):
+        # menuBar is the one persistent source used by the live Waybar manager.
+        # The snake_case menu object is a derived compatibility view only.
+        result["menuBar"] = copy.deepcopy(menu_bar)
+        result["menu"] = menu_alias_from_bar(menu_bar)
+    elif isinstance(menu, dict):
+        # Menu entries intentionally permit stable application identifiers and
+        # future modules, while top-level unrelated keys are never exposed.
+        result["menu"] = copy.deepcopy(menu)
+        result["menu"].setdefault("compactness", "normal")
+        result["menu"].setdefault("modules", copy.deepcopy(DEFAULT_SETTINGS["menu"]["modules"]))
+        result["menu"].setdefault("order", copy.deepcopy(DEFAULT_SETTINGS["menu"]["order"]))
+        result["menu"].setdefault("tray_hidden", [])
+        result["menuBar"] = menu_bar_from_alias(result["menu"])
+    return result
+
+
+def _validate_settings_schema(raw: dict[str, Any]) -> None:
+    """Reject malformed known fields rather than overwriting them with defaults."""
+    if "dnd" in raw and not isinstance(raw["dnd"], bool):
+        raise HelperError("settings field dnd must be a boolean")
+    weather = raw.get("weather")
+    if weather is not None:
+        if not isinstance(weather, dict):
+            raise HelperError("settings field weather must be an object")
+        for key in ("city", "name", "country", "timezone"):
+            if key in weather and not isinstance(weather[key], str):
+                raise HelperError(f"weather setting {key} must be text")
+        for key, lower, upper in (("latitude", -90, 90), ("longitude", -180, 180)):
+            value = weather.get(key)
+            if value is not None and (
+                not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(float(value)) or not lower <= float(value) <= upper
+            ):
+                raise HelperError(f"weather setting {key} is invalid")
+    menu = raw.get("menu")
+    if menu is not None:
+        if not isinstance(menu, dict):
+            raise HelperError("settings field menu must be an object")
+        if "compactness" in menu and menu["compactness"] not in {"compact", "normal", "relaxed"}:
+            raise HelperError("menu compactness is invalid")
+        modules = menu.get("modules")
+        if modules is not None and (
+            not isinstance(modules, dict)
+            or any(not isinstance(key, str) or not isinstance(value, bool) for key, value in modules.items())
+        ):
+            raise HelperError("menu modules must contain boolean values")
+        order = menu.get("order")
+        if order is not None:
+            if not isinstance(order, dict):
+                raise HelperError("menu order must be an object")
+            for section in ("left", "center", "right"):
+                value = order.get(section)
+                if value is not None and (
+                    not isinstance(value, list) or any(not isinstance(item, str) for item in value)
+                ):
+                    raise HelperError(f"menu order {section} must be a text list")
+        hidden = menu.get("tray_hidden")
+        if hidden is not None and (
+            not isinstance(hidden, list) or any(not isinstance(item, str) for item in hidden)
+        ):
+            raise HelperError("menu tray_hidden must be a text list")
+    menu_bar = raw.get("menuBar")
+    if menu_bar is not None:
+        if not isinstance(menu_bar, dict):
+            raise HelperError("settings field menuBar must be an object")
+        if "density" in menu_bar and menu_bar["density"] not in {"compact", "normal", "relaxed"}:
+            raise HelperError("menuBar density is invalid")
+        modules = menu_bar.get("modules")
+        if modules is not None and (
+            not isinstance(modules, dict)
+            or any(not isinstance(key, str) or not isinstance(value, bool) for key, value in modules.items())
+        ):
+            raise HelperError("menuBar modules must contain boolean values")
+        order = menu_bar.get("rightOrder")
+        if order is not None and (
+            not isinstance(order, list) or any(not isinstance(item, str) for item in order)
+            or len(order) != len(set(order))
+        ):
+            raise HelperError("menuBar rightOrder must be a unique text list")
+        hidden = menu_bar.get("trayHidden")
+        if hidden is not None and (
+            not isinstance(hidden, list) or any(not isinstance(item, str) for item in hidden)
+        ):
+            raise HelperError("menuBar trayHidden must be a text list")
+
+
+class SettingsStore:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or config_home() / "hypr-shell/settings.json"
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+
+    def _read_raw(self) -> dict[str, Any]:
+        try:
+            value = json.loads(read_text_file(self.path))
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HelperError("settings file is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise HelperError("settings file root must be an object")
+        return value
+
+    def load(self) -> dict[str, Any]:
+        try:
+            raw = self._read_raw()
+            _validate_settings_schema(raw)
+            return _public_settings(raw)
+        except HelperError as exc:
+            result = copy.deepcopy(DEFAULT_SETTINGS)
+            result["error"] = str(exc)
+            return result
+
+    def update(self, mutator: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            raw = self._read_raw()
+            _validate_settings_schema(raw)
+            public = _public_settings(raw)
+            previous_menu = copy.deepcopy(public["menu"])
+            mutator(public)
+            _validate_settings_schema(public)
+            encoded = json.dumps(public, ensure_ascii=False)
+            if len(encoded.encode("utf-8")) > 128 * 1024:
+                raise ValueError("settings exceed 128 KiB")
+            update = {
+                "schema_version": 1,
+                "dnd": public["dnd"],
+                "weather": public["weather"],
+            }
+            if isinstance(raw.get("menuBar"), dict):
+                if public["menu"] != previous_menu:
+                    public["menuBar"] = menu_bar_from_alias(public["menu"], public.get("menuBar"))
+                update["menuBar"] = public["menuBar"]
+                raw.pop("menu", None)
+            else:
+                update["menu"] = public["menu"]
+            raw.update(update)
+            atomic_write_json(self.path, raw)
+            return _public_settings(raw)
+        finally:
+            os.close(lock_fd)
+
+
+def _json_safe(value: Any, depth: int = 0) -> bool:
+    if depth > 8:
+        return False
+    if value is None or isinstance(value, (str, bool, int)):
+        return not isinstance(value, str) or len(value) <= 4096
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return len(value) <= 256 and all(_json_safe(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return len(value) <= 256 and all(
+            isinstance(key, str) and len(key) <= 128 and _json_safe(item, depth + 1)
+            for key, item in value.items()
+        )
+    return False
+
+
+def set_menu_setting(store: SettingsStore, key: str, value: Any) -> dict[str, Any]:
+    if not MENU_KEY_PATTERN.fullmatch(key) or len(key) > 256:
+        raise ValueError("invalid menu setting key")
+    if not _json_safe(value):
+        raise ValueError("invalid menu setting value")
+    parts = key.split(".")
+
+    def mutate(settings: dict[str, Any]) -> None:
+        target = settings["menu"]
+        for part in parts[:-1]:
+            existing = target.get(part)
+            if not isinstance(existing, dict):
+                existing = {}
+                target[part] = existing
+            target = existing
+        target[parts[-1]] = copy.deepcopy(value)
+
+    return store.update(mutate)
+
+
+def unset_menu_setting(store: SettingsStore, key: str) -> dict[str, Any]:
+    if not MENU_KEY_PATTERN.fullmatch(key) or len(key) > 256:
+        raise ValueError("invalid menu setting key")
+    parts = key.split(".")
+
+    def mutate(settings: dict[str, Any]) -> None:
+        target: Any = settings["menu"]
+        for part in parts[:-1]:
+            if not isinstance(target, dict) or not isinstance(target.get(part), dict):
+                return
+            target = target[part]
+        if isinstance(target, dict):
+            target.pop(parts[-1], None)
+
+    return store.update(mutate)
+
+
+def set_dnd(store: SettingsStore, action: str) -> dict[str, bool]:
+    if action not in {"on", "off", "toggle"}:
+        raise ValueError("DND action must be on, off, or toggle")
+
+    def mutate(settings: dict[str, Any]) -> None:
+        settings["dnd"] = not settings["dnd"] if action == "toggle" else action == "on"
+
+    settings = store.update(mutate)
+    return {"enabled": settings["dnd"]}
+
+
+def fetch_json(url: str, timeout: float = WEATHER_TIMEOUT) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"User-Agent": "hypr-rice-panel-data/3"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(MAX_HTTP_BYTES + 1)
+    except (OSError, urllib.error.URLError) as exc:
+        raise HelperError("weather service unavailable") from exc
+    if len(data) > MAX_HTTP_BYTES:
+        raise HelperError("weather response was too large")
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HelperError("weather service returned invalid data") from exc
+    if not isinstance(payload, dict):
+        raise HelperError("weather service returned invalid data")
+    return payload
+
+
+def _weather_condition(code: Any) -> dict[str, Any]:
+    try:
+        numeric = int(code)
+    except (TypeError, ValueError):
+        return {"code": None, "description": "Unknown", "icon": "weather-none-available"}
+    description, icon = WEATHER_CODES.get(numeric, ("Unknown", "weather-none-available"))
+    return {"code": numeric, "description": description, "icon": icon}
+
+
+def _finite_value(value: Any, digits: int = 1) -> float | int | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
+        return None
+    rounded = round(float(value), digits)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def format_forecast(raw: dict[str, Any], location: dict[str, Any]) -> dict[str, Any]:
+    current_raw = raw.get("current") if isinstance(raw.get("current"), dict) else {}
+    daily_raw = raw.get("daily") if isinstance(raw.get("daily"), dict) else {}
+    hourly_raw = raw.get("hourly") if isinstance(raw.get("hourly"), dict) else {}
+    condition = _weather_condition(current_raw.get("weather_code"))
+    current: dict[str, Any] = {
+        "temperature_c": _finite_value(current_raw.get("temperature_2m")),
+        "feels_like_c": _finite_value(current_raw.get("apparent_temperature")),
+        "humidity_percent": _finite_value(current_raw.get("relative_humidity_2m"), 0),
+        "wind_kph": _finite_value(current_raw.get("wind_speed_10m")),
+        **condition,
+    }
+    daily_times = daily_raw.get("time") if isinstance(daily_raw.get("time"), list) else []
+    highs = daily_raw.get("temperature_2m_max") if isinstance(daily_raw.get("temperature_2m_max"), list) else []
+    lows = daily_raw.get("temperature_2m_min") if isinstance(daily_raw.get("temperature_2m_min"), list) else []
+    precipitation = daily_raw.get("precipitation_probability_max") if isinstance(daily_raw.get("precipitation_probability_max"), list) else []
+    daily_codes = daily_raw.get("weather_code") if isinstance(daily_raw.get("weather_code"), list) else []
+    daily: list[dict[str, Any]] = []
+    for index, day in enumerate(daily_times[:7]):
+        item: dict[str, Any] = {"date": day}
+        if index < len(highs):
+            item["high_c"] = _finite_value(highs[index])
+        if index < len(lows):
+            item["low_c"] = _finite_value(lows[index])
+        if index < len(precipitation):
+            item["precipitation_percent"] = _finite_value(precipitation[index], 0)
+        if index < len(daily_codes):
+            item.update(_weather_condition(daily_codes[index]))
+        daily.append(item)
+    hourly_times = hourly_raw.get("time") if isinstance(hourly_raw.get("time"), list) else []
+    hourly_temps = hourly_raw.get("temperature_2m") if isinstance(hourly_raw.get("temperature_2m"), list) else []
+    hourly_codes = hourly_raw.get("weather_code") if isinstance(hourly_raw.get("weather_code"), list) else []
+    hourly_precip = hourly_raw.get("precipitation_probability") if isinstance(hourly_raw.get("precipitation_probability"), list) else []
+    hourly: list[dict[str, Any]] = []
+    for index, stamp in enumerate(hourly_times[:24]):
+        item = {"time": stamp}
+        if index < len(hourly_temps):
+            item["temperature_c"] = _finite_value(hourly_temps[index])
+        if index < len(hourly_codes):
+            item.update(_weather_condition(hourly_codes[index]))
+        if index < len(hourly_precip):
+            item["precipitation_percent"] = _finite_value(hourly_precip[index], 0)
+        hourly.append(item)
+    return {
+        "available": True,
+        "location": {
+            "name": location.get("name") or location.get("city"),
+            "country": location.get("country") or "",
+            "timezone": location.get("timezone") or "auto",
+        },
+        "current": current,
+        "today": daily[0] if daily else {},
+        "daily": daily,
+        "hourly": hourly,
+    }
+
+
+class WeatherService:
+    def __init__(
+        self,
+        store: SettingsStore,
+        *,
+        cache_path: Path | None = None,
+        fetch_json: Callable[[str, float], dict[str, Any]] = fetch_json,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        self.store = store
+        self.cache_path = cache_path or cache_home() / "hypr-shell/weather.json"
+        self.fetch_json = fetch_json
+        self.now = now
+        self.next_retry_at = 0.0
+        self.last_error = ""
+
+    def _cache(self) -> dict[str, Any] | None:
+        try:
+            value = json.loads(read_text_file(self.cache_path))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        fetched_at = value.get("fetched_at")
+        if (
+            not isinstance(fetched_at, (int, float)) or isinstance(fetched_at, bool)
+            or not math.isfinite(float(fetched_at))
+            or not isinstance(value.get("location_key"), str)
+            or not isinstance(value.get("payload"), dict)
+        ):
+            return None
+        return value
+
+    @staticmethod
+    def _location_key(location: dict[str, Any]) -> str:
+        return f"{location.get('latitude')}:{location.get('longitude')}:{location.get('timezone')}"
+
+    def payload(self) -> dict[str, Any]:
+        settings = self.store.load()
+        location = settings.get("weather", {})
+        latitude = location.get("latitude") if isinstance(location, dict) else None
+        longitude = location.get("longitude") if isinstance(location, dict) else None
+        if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
+            return {"available": False, "configured": False, "error": "Weather location is not configured"}
+        now = self.now()
+        key = self._location_key(location)
+        cached = self._cache()
+        if cached and cached.get("location_key") == key:
+            fetched_at = float(cached["fetched_at"])
+            raw_age = now - fetched_at
+            # Tolerate small clock corrections, but never let a far-future
+            # timestamp suppress refresh indefinitely.
+            age = WEATHER_CACHE_SECONDS if raw_age < -300 else max(0.0, raw_age)
+            if age < WEATHER_CACHE_SECONDS:
+                result = copy.deepcopy(cached["payload"])
+                result.update({"stale": False, "cache_age_seconds": int(age)})
+                return result
+        if now < self.next_retry_at:
+            if cached and cached.get("location_key") == key:
+                result = copy.deepcopy(cached["payload"])
+                result.update({"stale": True, "error": self.last_error or "Weather refresh is temporarily delayed"})
+                return result
+            return {
+                "available": False,
+                "configured": True,
+                "stale": False,
+                "error": self.last_error or "Weather refresh is temporarily delayed",
+            }
+        query = urllib.parse.urlencode({
+            "latitude": latitude,
+            "longitude": longitude,
+            "timezone": location.get("timezone") or "auto",
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
+            "hourly": "temperature_2m,weather_code,precipitation_probability",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "forecast_days": 7,
+        })
+        try:
+            raw = self.fetch_json(f"https://api.open-meteo.com/v1/forecast?{query}", WEATHER_TIMEOUT)
+            payload = format_forecast(raw, location)
+            atomic_write_json(self.cache_path, {
+                "fetched_at": now,
+                "location_key": key,
+                "payload": payload,
+            })
+            self.last_error = ""
+            payload.update({"stale": False, "cache_age_seconds": 0})
+            return payload
+        except HelperError as exc:
+            self.next_retry_at = now + 60
+            self.last_error = str(exc)
+            if cached and cached.get("location_key") == key:
+                result = copy.deepcopy(cached["payload"])
+                result.update({"stale": True, "error": str(exc)})
+                return result
+            return {"available": False, "configured": True, "stale": False, "error": str(exc)}
+
+
+def save_weather_location(store: SettingsStore, location: dict[str, Any]) -> dict[str, Any]:
+    required = ("name", "latitude", "longitude")
+    if any(key not in location for key in required):
+        raise ValueError("incomplete weather location")
+    latitude = location["latitude"]
+    longitude = location["longitude"]
+    if (
+        not isinstance(latitude, (int, float)) or isinstance(latitude, bool)
+        or not isinstance(longitude, (int, float)) or isinstance(longitude, bool)
+        or not -90 <= float(latitude) <= 90 or not -180 <= float(longitude) <= 180
+    ):
+        raise ValueError("invalid weather coordinates")
+    saved = {
+        "city": str(location["name"])[:200],
+        "name": str(location["name"])[:200],
+        "country": str(location.get("country") or "")[:200],
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "timezone": str(location.get("timezone") or "auto")[:100],
+    }
+
+    def mutate(settings: dict[str, Any]) -> None:
+        settings["weather"] = copy.deepcopy(saved)
+
+    store.update(mutate)
+    return saved
+
+
+def set_weather_city(
+    store: SettingsStore,
+    city: str,
+    *,
+    fetch_json: Callable[[str, float], dict[str, Any]] = fetch_json,
+) -> dict[str, Any]:
+    city = city.strip()
+    if not city or len(city) > 200 or any(not character.isprintable() for character in city):
+        raise ValueError("invalid weather location")
+    query = urllib.parse.urlencode({"name": city, "count": 1, "language": "en", "format": "json"})
+    response = fetch_json(f"https://geocoding-api.open-meteo.com/v1/search?{query}", WEATHER_TIMEOUT)
+    results = response.get("results")
+    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+        raise HelperError("Weather location was not found")
+    location = save_weather_location(store, results[0])
+    try:
+        (cache_home() / "hypr-shell/weather.json").unlink()
+    except FileNotFoundError:
+        pass
+    return location
+
+
+def parse_speedtest_result(raw: dict[str, Any]) -> dict[str, Any]:
+    # Arch's official-repository speedtest-cli package emits a flat JSON
+    # document whose download/upload values are bits per second.
+    if not isinstance(raw.get("ping"), dict):
+        ping_ms = _finite_value(raw.get("ping"), 2)
+        download_bps = _finite_value(raw.get("download"), 3)
+        upload_bps = _finite_value(raw.get("upload"), 3)
+        if ping_ms is None or download_bps is None or upload_bps is None:
+            raise HelperError("speedtest returned incomplete measurements")
+        result = {
+            "timestamp": raw.get("timestamp") if isinstance(raw.get("timestamp"), str) else utc_timestamp(),
+            "ping_ms": ping_ms,
+            "download_mbps": round(float(download_bps) / 1_000_000.0, 2),
+            "upload_mbps": round(float(upload_bps) / 1_000_000.0, 2),
+        }
+        server = raw.get("server")
+        if isinstance(server, dict):
+            safe_server = {
+                key: server[key] for key in ("sponsor", "name", "country")
+                if isinstance(server.get(key), str) and len(server[key]) <= 200
+            }
+            if safe_server:
+                result["server"] = safe_server
+        return result
+    ping = raw.get("ping") if isinstance(raw.get("ping"), dict) else {}
+    download = raw.get("download") if isinstance(raw.get("download"), dict) else {}
+    upload = raw.get("upload") if isinstance(raw.get("upload"), dict) else {}
+    ping_ms = _finite_value(ping.get("latency"), 2)
+    down_bandwidth = _finite_value(download.get("bandwidth"), 3)
+    up_bandwidth = _finite_value(upload.get("bandwidth"), 3)
+    if ping_ms is None or down_bandwidth is None or up_bandwidth is None:
+        raise HelperError("speedtest returned incomplete measurements")
+    result: dict[str, Any] = {
+        "timestamp": raw.get("timestamp") if isinstance(raw.get("timestamp"), str) else utc_timestamp(),
+        "ping_ms": ping_ms,
+        "download_mbps": round(float(down_bandwidth) * 8.0 / 1_000_000.0, 2),
+        "upload_mbps": round(float(up_bandwidth) * 8.0 / 1_000_000.0, 2),
+    }
+    packet_loss = _finite_value(raw.get("packetLoss"), 2)
+    if packet_loss is not None:
+        result["packet_loss_percent"] = packet_loss
+    server = raw.get("server")
+    if isinstance(server, dict):
+        safe_server = {
+            key: server[key] for key in ("name", "location", "country")
+            if isinstance(server.get(key), str) and len(server[key]) <= 200
+        }
+        if safe_server:
+            result["server"] = safe_server
+    return result
+
+
+def trusted_speedtest_binary(binary: str) -> bool:
+    try:
+        path = Path(binary).resolve(strict=True)
+        metadata = path.stat()
+    except OSError:
+        return False
+    return (
+        path.name in {"speedtest", "speedtest-cli"}
+        and path.parent == Path("/usr/bin")
+        and stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_mode & 0o022 == 0
+        and os.access(path, os.X_OK)
+    )
+
+
+def verify_official_speedtest(binary: str) -> None:
+    if not trusted_speedtest_binary(binary):
+        raise HelperError("official system Ookla speedtest CLI is required")
+    try:
+        completed = subprocess.run(
+            (binary, "--version"), check=False, capture_output=True, text=True,
+            timeout=3, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HelperError("unable to verify speedtest CLI") from exc
+    version = f"{completed.stdout}\n{completed.stderr}".lower()
+    valid_ookla = re.search(r"^speedtest by ookla\b", version, re.MULTILINE)
+    valid_arch_cli = Path(binary).name == "speedtest-cli" and "speedtest-cli" in version
+    if completed.returncode != 0 or not (valid_ookla or valid_arch_cli):
+        raise HelperError("official system speedtest CLI is required")
+
+
+class SpeedtestManager:
+    def __init__(self, *, state_path: Path | None = None, lock_path: Path | None = None) -> None:
+        self.state_path = state_path or state_home() / "hypr-shell/speedtest.json"
+        self.lock_path = lock_path or runtime_home() / "hypr-shell-speedtest.lock"
+        self.state_lock_path = self.state_path.with_suffix(self.state_path.suffix + ".lock")
+
+    @contextmanager
+    def _state_guard(self):
+        self.state_lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.state_lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
+    def _write_state_unlocked(self, value: dict[str, Any]) -> None:
+        atomic_write_json(self.state_path, value)
+
+    def write_state(self, value: dict[str, Any]) -> None:
+        with self._state_guard():
+            self._write_state_unlocked(value)
+
+    def _read_state_unlocked(self) -> dict[str, Any]:
+        invalid = {"state": "error", "result": None, "history": [], "error": "Speed test state is invalid"}
+        try:
+            value = json.loads(read_text_file(self.state_path))
+        except FileNotFoundError:
+            return {"state": "idle", "result": None, "history": []}
+        except (OSError, json.JSONDecodeError):
+            return invalid
+        if not isinstance(value, dict) or value.get("state") not in {"idle", "running", "complete", "error"}:
+            return invalid
+        if value.get("result") is not None and not isinstance(value.get("result"), dict):
+            return invalid
+        history = value.get("history", [])
+        if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+            return invalid
+        value.setdefault("result", None)
+        value["history"] = history[-5:]
+        return value
+
+    def read_state(self) -> dict[str, Any]:
+        with self._state_guard():
+            return self._read_state_unlocked()
+
+    def is_running(self) -> bool:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
+    def status(self) -> dict[str, Any]:
+        # The state lock serializes this read/check/repair transaction against
+        # the worker's final state write.  The worker keeps the run lock until
+        # after its state write, so a non-busy run lock really means interrupted.
+        with self._state_guard():
+            state = self._read_state_unlocked()
+            if state.get("state") == "running" and not self.is_running():
+                state.update({
+                    "state": "error",
+                    "error": "Speed test was interrupted",
+                    "finished_at": utc_timestamp(),
+                })
+                self._write_state_unlocked(state)
+            return state
+
+    def start(self, *, binary: str | None = None, verify_binary: bool = True) -> dict[str, Any]:
+        executable = binary or shutil.which("speedtest-cli") or shutil.which("speedtest")
+        if not executable:
+            raise HelperError("official Arch speedtest-cli package is not installed")
+        if verify_binary:
+            verify_official_speedtest(executable)
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise HelperError("Speed test is already running") from exc
+            previous = self.read_state()
+            state = {
+                "state": "running",
+                "started_at": utc_timestamp(),
+                "result": previous.get("result"),
+                "history": previous.get("history", [])[-5:],
+            }
+            self.write_state(state)
+            command = (
+                sys.executable, str(Path(__file__).resolve()), "_speedtest-worker",
+                "--lock-fd", str(descriptor), "--binary", executable,
+            )
+            try:
+                process = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, start_new_session=True,
+                    close_fds=True, pass_fds=(descriptor,),
+                )
+            except OSError as exc:
+                state.update({"state": "error", "error": "Unable to start speed test", "finished_at": utc_timestamp()})
+                self.write_state(state)
+                raise HelperError("unable to start speed test") from exc
+            return {"state": "running", "started_at": state["started_at"]}
+        finally:
+            os.close(descriptor)
+
+    def worker(self, lock_fd: int, binary: str) -> int:
+        # The inherited locked descriptor is intentionally retained for the
+        # whole benchmark.  It is the cross-process single-flight guarantee.
+        try:
+            inherited = os.fstat(lock_fd)
+            expected = os.stat(self.lock_path)
+        except OSError:
+            return 2
+        if (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino):
+            return 2
+        probe = os.open(self.lock_path, os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                fcntl.flock(probe, fcntl.LOCK_UN)
+                return 2
+        finally:
+            os.close(probe)
+        try:
+            verify_official_speedtest(binary)
+        except HelperError as exc:
+            state = self.read_state()
+            self.write_state({
+                "state": "error",
+                "started_at": state.get("started_at"),
+                "finished_at": utc_timestamp(),
+                "result": state.get("result"),
+                "history": state.get("history", [])[-5:],
+                "error": str(exc),
+            })
+            os.close(lock_fd)
+            return 2
+        state = self.read_state()
+        try:
+            command = ((binary, "--json", "--secure") if Path(binary).resolve().name == "speedtest-cli"
+                       else (binary, "--accept-license", "--accept-gdpr", "--format=json"))
+            completed = subprocess.run(
+                command,
+                check=False, capture_output=True, text=True, timeout=180,
+                stdin=subprocess.DEVNULL,
+            )
+            if completed.returncode != 0:
+                raise HelperError(f"speedtest failed (exit {completed.returncode})")
+            try:
+                raw = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                raise HelperError("speedtest returned invalid JSON") from exc
+            if not isinstance(raw, dict):
+                raise HelperError("speedtest returned invalid JSON")
+            result = parse_speedtest_result(raw)
+            history = state.get("history") if isinstance(state.get("history"), list) else []
+            history = (history + [result])[-5:]
+            self.write_state({
+                "state": "complete",
+                "started_at": state.get("started_at"),
+                "finished_at": utc_timestamp(),
+                "result": result,
+                "history": history,
+            })
+            return 0
+        except (HelperError, subprocess.TimeoutExpired, OSError) as exc:
+            message = "Speed test timed out" if isinstance(exc, subprocess.TimeoutExpired) else str(exc)
+            self.write_state({
+                "state": "error",
+                "started_at": state.get("started_at"),
+                "finished_at": utc_timestamp(),
+                "result": state.get("result"),
+                "history": state.get("history", [])[-5:],
+                "error": message,
+            })
+            return 1
+        finally:
+            os.close(lock_fd)
+
+
+class CachedValue:
+    def __init__(self, interval: float, function: Callable[[], Any]) -> None:
+        self.interval = interval
+        self.function = function
+        self.value: Any = None
+        self.updated = float("-inf")
+        self.attempts = 0
+
+    def get(self) -> Any:
+        now = time.monotonic()
+        if self.value is None or now - self.updated >= self.interval:
+            self.attempts += 1
+            self.value = self.function()
+            self.updated = now
+        return copy.deepcopy(self.value)
+
+
+class BackgroundCachedValue:
+    """Refresh a slow probe off the one-second stream's critical path."""
+
+    def __init__(
+        self,
+        interval: float,
+        function: Callable[[], Any],
+        fallback: Any,
+        executor: ThreadPoolExecutor,
+    ) -> None:
+        self.interval = interval
+        self.function = function
+        self.fallback = copy.deepcopy(fallback)
+        self.executor = executor
+        self.value = copy.deepcopy(fallback)
+        self.updated = float("-inf")
+        self.future: Future[Any] | None = None
+        self.attempts = 0
+
+    def get(self) -> Any:
+        now = time.monotonic()
+        if self.future is not None and self.future.done():
+            try:
+                self.value = self.future.result()
+            except HelperError as exc:
+                self.value = copy.deepcopy(self.fallback)
+                if isinstance(self.value, dict):
+                    self.value["error"] = str(exc)
+            except Exception:
+                self.value = copy.deepcopy(self.fallback)
+                if isinstance(self.value, dict):
+                    self.value["error"] = "component data unavailable"
+            self.updated = now
+            self.future = None
+        if self.future is None and now - self.updated >= self.interval:
+            self.attempts += 1
+            self.future = self.executor.submit(self.function)
+        return copy.deepcopy(self.value)
+
+
+def _safe_component(function: Callable[[], Any], fallback: Any) -> Any:
+    try:
+        return function()
+    except HelperError as exc:
+        result = copy.deepcopy(fallback)
+        if isinstance(result, dict):
+            result["error"] = str(exc)
+        return result
+    except Exception:
+        result = copy.deepcopy(fallback)
+        if isinstance(result, dict):
+            result["error"] = "component data unavailable"
+        return result
+
+
+class PanelCollector:
+    """Collect fast /proc metrics each tick and cache slower subprocess probes."""
+
+    def __init__(self, *, background_slow: bool = False) -> None:
+        self.settings_store = SettingsStore()
+        self.weather = WeatherService(self.settings_store)
+        self.speedtest = SpeedtestManager()
+        self.cpu_sampler = CpuSampler()
+        self.network_sampler = NetworkRateSampler()
+        self._executor: ThreadPoolExecutor | None = None
+        self._weather_cache: BackgroundCachedValue | None = None
+        if background_slow:
+            self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="panel-probe")
+            self._network_cache = BackgroundCachedValue(
+                5.0, network_payload,
+                {"connected": False, "state": "unknown", "interface": None, "vpns": [], "error": "Network data initializing"},
+                self._executor,
+            )
+            self._gpu_cache = BackgroundCachedValue(2.0, gpu_payloads, [], self._executor)
+            self._bluetooth_cache = BackgroundCachedValue(
+                3.0, bluetooth_payload,
+                {"available": False, "powered": False, "devices": [], "error": "Bluetooth data initializing"},
+                self._executor,
+            )
+            self._localsend_cache = BackgroundCachedValue(
+                5.0, localsend_payload,
+                {"process_running": False, "ready": False, "alias": None, "ip": None, "error": "LocalSend data initializing"},
+                self._executor,
+            )
+            self._weather_cache = BackgroundCachedValue(
+                1.0, self.weather.payload,
+                {"available": False, "error": "Weather data initializing"},
+                self._executor,
+            )
+        else:
+            self._network_cache = CachedValue(5.0, network_payload)
+            self._gpu_cache = CachedValue(2.0, gpu_payloads)
+            self._bluetooth_cache = CachedValue(3.0, bluetooth_payload)
+            self._localsend_cache = CachedValue(5.0, localsend_payload)
+
+    def network_details(self) -> dict[str, Any]:
+        return self._network_cache.get()
+
+    def gpu_details(self) -> list[dict[str, Any]]:
+        return self._gpu_cache.get()
+
+    def bluetooth_details(self) -> dict[str, Any]:
+        return self._bluetooth_cache.get()
+
+    def localsend_details(self) -> dict[str, Any]:
+        return self._localsend_cache.get()
+
+    def weather_details(self) -> dict[str, Any]:
+        return self._weather_cache.get() if self._weather_cache is not None else self.weather.payload()
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def snapshot(self) -> dict[str, Any]:
+        network = _safe_component(
+            self.network_details,
+            {"connected": False, "state": "unknown", "interface": None, "vpns": []},
+        )
+        interface = network.get("interface") if isinstance(network, dict) else None
+        throughput = _safe_component(
+            lambda: self.network_sampler.sample(interface),
+            {"rx_bytes_per_second": None, "tx_bytes_per_second": None},
+        )
+        if isinstance(network, dict):
+            network["throughput"] = throughput
+        cpu = _safe_component(self.cpu_sampler.sample, {"usage_percent": None})
+        if isinstance(cpu, dict):
+            cpu.update(_safe_component(cpu_details, {}))
+        settings = self.settings_store.load()
+        return {
+            "timestamp": utc_timestamp(),
+            "cpu": cpu,
+            "memory": _safe_component(memory_payload, {}),
+            "gpus": _safe_component(self.gpu_details, []),
+            "network": network,
+            "bluetooth": _safe_component(
+                self.bluetooth_details,
+                {"available": False, "powered": False, "devices": []},
+            ),
+            "localsend": _safe_component(
+                self.localsend_details,
+                {"process_running": False, "ready": False, "alias": None, "ip": None},
+            ),
+            "weather": _safe_component(
+                self.weather_details,
+                {"available": False, "error": "Weather data unavailable"},
+            ),
+            "settings": settings,
+            "dnd": {"enabled": bool(settings.get("dnd", False))},
+            "menu": copy.deepcopy(settings.get("menu", {})),
+            "speedtest": _safe_component(
+                self.speedtest.status,
+                {"state": "error", "result": None, "error": "Speed test state unavailable"},
+            ),
+        }
+
+
+def stream_payloads(interval: float, collector: PanelCollector | None = None) -> None:
+    if not 1.0 <= interval <= 60.0:
+        raise ValueError("stream interval must be between 1 and 60 seconds")
+    collector = collector or PanelCollector(background_slow=True)
+    deadline = time.monotonic()
+    try:
+        while True:
+            try:
+                print(json.dumps(collector.snapshot(), separators=(",", ":")), flush=True)
+            except BrokenPipeError:
+                return
+            deadline += interval
+            delay = deadline - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                deadline = time.monotonic()
+    finally:
+        collector.close()
+
+
+def parse_cli_value(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def waybar_network_payload() -> dict[str, Any]:
+    network = network_payload()
+    connected = bool(network.get("connected"))
+    connection = str(network.get("connection") or "Offline")
+    interface = str(network.get("interface") or "—")
+    address = str(network.get("ipv4") or "—")
+    return {
+        "text": "󰈀" if connected else "󰈂",
+        "tooltip": f"{connection}\n{interface} · {address}" if connected else "Network offline",
+        "class": "connected" if connected else "disconnected",
+        "alt": str(network.get("type") or "offline"),
+    }
+
+
+def waybar_weather_payload() -> dict[str, Any]:
+    weather = WeatherService(SettingsStore()).payload()
+    if not weather.get("available"):
+        return {
+            "text": "󰖐",
+            "tooltip": str(weather.get("error") or "Weather unavailable"),
+            "class": "unavailable",
+            "alt": "unavailable",
+        }
+    current = weather.get("current") if isinstance(weather.get("current"), dict) else {}
+    location = weather.get("location") if isinstance(weather.get("location"), dict) else {}
+    temperature = current.get("temperature_c")
+    description = str(current.get("description") or "Weather")
+    place = str(location.get("name") or "Configured location")
+    text = f"{round(float(temperature))}°" if isinstance(temperature, (int, float)) else "󰖐"
+    return {
+        "text": text,
+        "tooltip": f"{place}\n{description}",
+        "class": "stale" if weather.get("stale") else "current",
+        "alt": str(current.get("icon") or "weather"),
+    }
+
+
+def parser() -> argparse.ArgumentParser:
+    cli = argparse.ArgumentParser(description=__doc__)
+    commands = cli.add_subparsers(dest="command", required=True)
+    commands.add_parser("snapshot", help="print one complete panel snapshot")
+    commands.add_parser("network", help="print active network and VPN JSON")
+    commands.add_parser("waybar-network", help="print Waybar network JSON")
+    commands.add_parser("waybar-weather", help="print Waybar weather JSON")
+
+    vpn = commands.add_parser("vpn", help="activate or deactivate a VPN profile")
+    vpn.add_argument("action", choices=("up", "down"))
+    vpn.add_argument("name")
+
+    localsend = commands.add_parser("localsend", help="print LocalSend state or open it")
+    localsend.add_argument("action", nargs="?", choices=("open",))
+
+    bluetooth = commands.add_parser("bluetooth", help="query or control Bluetooth")
+    bluetooth.add_argument("action", choices=("status", "power", "connect", "disconnect", "scan"))
+    bluetooth.add_argument("target", nargs="?")
+
+    weather = commands.add_parser("weather", help="query weather or configure its city")
+    weather.add_argument("action", choices=("status", "location"))
+    weather.add_argument("value", nargs="*")
+
+    dnd = commands.add_parser("dnd", help="query or change Do Not Disturb")
+    dnd.add_argument("action", choices=("status", "on", "off", "toggle"))
+
+    menu = commands.add_parser("menu", help="query or change menu-bar settings")
+    menu.add_argument("action", choices=("get", "set", "unset"))
+    menu.add_argument("key", nargs="?")
+    menu.add_argument("value", nargs="?")
+
+    speedtest = commands.add_parser("speedtest", help="query or manually start an Ookla speed test")
+    speedtest.add_argument("action", choices=("status", "start"))
+
+    stream = commands.add_parser("stream", help="emit newline-delimited panel JSON")
+    stream.add_argument("--interval", type=float, default=1.0)
+
+    worker = commands.add_parser("_speedtest-worker", help=argparse.SUPPRESS)
+    worker.add_argument("--lock-fd", required=True, type=int)
+    worker.add_argument("--binary", required=True)
+    return cli
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    args = parser().parse_args(argv)
+    try:
+        payload: Any = None
+        if args.command == "snapshot":
+            payload = PanelCollector().snapshot()
+        elif args.command == "network":
+            payload = network_payload()
+        elif args.command == "waybar-network":
+            payload = waybar_network_payload()
+        elif args.command == "waybar-weather":
+            payload = waybar_weather_payload()
+        elif args.command == "vpn":
+            payload = set_vpn(args.action, args.name)
+        elif args.command == "localsend":
+            payload = open_localsend() if args.action == "open" else localsend_payload()
+        elif args.command == "bluetooth":
+            payload = bluetooth_payload() if args.action == "status" else bluetooth_action(args.action, args.target)
+        elif args.command == "weather":
+            store = SettingsStore()
+            if args.action == "status":
+                payload = WeatherService(store).payload()
+            else:
+                if not args.value:
+                    raise ValueError("weather location requires a city")
+                payload = set_weather_city(store, " ".join(args.value))
+        elif args.command == "dnd":
+            store = SettingsStore()
+            payload = {"enabled": bool(store.load().get("dnd"))} if args.action == "status" else set_dnd(store, args.action)
+        elif args.command == "menu":
+            store = SettingsStore()
+            if args.action == "get":
+                payload = {"menu": store.load().get("menu", {})}
+            elif args.action == "set":
+                if args.key is None or args.value is None:
+                    raise ValueError("menu set requires a key and value")
+                payload = {"menu": set_menu_setting(store, args.key, parse_cli_value(args.value))["menu"]}
+            else:
+                if args.key is None:
+                    raise ValueError("menu unset requires a key")
+                payload = {"menu": unset_menu_setting(store, args.key)["menu"]}
+        elif args.command == "speedtest":
+            manager = SpeedtestManager()
+            payload = manager.status() if args.action == "status" else manager.start()
+        elif args.command == "stream":
+            stream_payloads(args.interval)
+            return 0
+        elif args.command == "_speedtest-worker":
+            return SpeedtestManager().worker(args.lock_fd, args.binary)
+        if payload is not None:
+            print(json.dumps(payload, separators=(",", ":")), flush=True)
+        return 0
+    except (HelperError, ValueError) as exc:
+        print(json.dumps({"error": str(exc)}, separators=(",", ":")), flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

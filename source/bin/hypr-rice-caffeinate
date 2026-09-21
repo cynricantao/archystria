@@ -1,0 +1,64 @@
+#!/bin/sh
+# Control the fixed user caffeinate service and emit Waybar JSON.
+set -eu
+
+SERVICE='hypr-rice-caffeinate.service'
+TIMEOUT='4'
+
+usage() {
+    cat <<'EOF'
+Usage: caffeinate.sh {status|toggle|on|off}
+
+  status  Print Waybar JSON for the fixed user service
+  toggle  Stop it when active, otherwise start it
+  on      Start it
+  off     Stop it
+EOF
+}
+
+is_active() {
+    state=$(timeout "$TIMEOUT" systemctl --user is-active "$SERVICE" 2>/dev/null || true)
+    [ "$state" = 'active' ] || [ "$state" = 'activating' ]
+}
+
+print_status() {
+    if is_active; then
+        printf '%s\n' '{"text":"󰅶","tooltip":"Caffeinate on · click to allow idle/sleep","class":"active","alt":"on"}'
+    else
+        printf '%s\n' '{"text":"󰅶","tooltip":"Caffeinate off · click to inhibit idle/sleep","class":"inactive","alt":"off"}'
+    fi
+}
+
+case "${1:-}" in
+    status)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        print_status
+        ;;
+    toggle)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        if is_active; then
+            timeout "$TIMEOUT" systemctl --user stop "$SERVICE" >/dev/null
+        else
+            timeout "$TIMEOUT" systemctl --user start "$SERVICE" >/dev/null
+        fi
+        print_status
+        ;;
+    on)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        timeout "$TIMEOUT" systemctl --user start "$SERVICE" >/dev/null
+        print_status
+        ;;
+    off)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        timeout "$TIMEOUT" systemctl --user stop "$SERVICE" >/dev/null
+        print_status
+        ;;
+    -h|--help)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -u
+
+mode="${1:-region}"
+pictures="$(xdg-user-dir PICTURES 2>/dev/null || true)"
+[[ -n "$pictures" ]] || pictures="$HOME/Pictures"
+out_dir="$pictures/Screenshots"
+if ! mkdir -p -- "$out_dir"; then
+    notify-send -u critical -a "Screenshot" -i dialog-error "Could not create screenshot directory" "$out_dir"
+    exit 1
+fi
+out="$out_dir/Screenshot-$(date +'%Y-%m-%d-%H-%M-%S').png"
+
+geometry=""
+case "$mode" in
+    region)
+        geometry="$(slurp -b '#0b0f1488' -c '#7aa2f7ff' -s '#7aa2f744' -w 2)" || exit 0
+        [[ -n "$geometry" ]] || exit 0
+        ;;
+    active)
+        geometry="$(hyprctl -j activewindow 2>/dev/null | jq -er '
+            select(.address != null and .address != "0x")
+            | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"
+        ' 2>/dev/null)" || {
+            notify-send -u critical -a "Screenshot" -i dialog-error "No active window to capture"
+            exit 1
+        }
+        ;;
+    full)
+        ;;
+    *)
+        printf 'Usage: %s [region|full|active]\n' "${0##*/}" >&2
+        exit 2
+        ;;
+esac
+
+if [[ -n "$geometry" ]]; then
+    capture=(grim -g "$geometry" "$out")
+else
+    capture=(grim "$out")
+fi
+
+if ! "${capture[@]}" || [[ ! -s "$out" ]]; then
+    rm -f -- "$out"
+    notify-send -u critical -a "Screenshot" -i dialog-error "Screenshot failed"
+    exit 1
+fi
+
+if ! wl-copy --type image/png < "$out"; then
+    notify-send -u critical -a "Screenshot" -i dialog-error "Screenshot saved, but clipboard copy failed" "$out"
+    printf '%s\n' "$out"
+    exit 1
+fi
+notify-send -a "Screenshot" -i "$out" "Screenshot saved and copied" "$out"
+printf '%s\n' "$out"

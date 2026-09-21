@@ -1,0 +1,47 @@
+palette = "matugen"
+format = "$directory$git_branch$git_status$fill$cmd_duration$time$line_break$character"
+
+[palettes.matugen]
+surface = "#12121c"
+surface_high = "#292934"
+text = "#e3e1ef"
+muted = "#c7c5d3"
+primary = "#c0c1ff"
+on_primary = "#1000a9"
+secondary = "#cdc0e9"
+tertiary = "#dcbaf0"
+error = "#ffb4ab"
+
+[directory]
+style = "bold primary"
+format = "[ 󰉋 $path ]($style)"
+truncation_length = 4
+truncate_to_repo = false
+
+[git_branch]
+symbol = " "
+style = "bold tertiary"
+format = "[ $symbol$branch ]($style)"
+
+[git_status]
+style = "bold secondary"
+format = "[$all_status$ahead_behind ]($style)"
+
+[fill]
+symbol = " "
+
+[cmd_duration]
+min_time = 800
+style = "muted"
+format = "[󱎫 $duration ]($style)"
+
+[time]
+disabled = false
+time_format = "%H:%M"
+style = "muted"
+format = "[ $time ]($style)"
+
+[character]
+success_symbol = "[❯](bold primary)"
+error_symbol = "[❯](bold error)"
+vimcmd_symbol = "[❮](bold tertiary)"

@@ -1,0 +1,9 @@
+[Unit]
+Description=Desktop volume and media OSD
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service
+
+[Service]
+ExecStart=/usr/bin/swayosd-server
+Restart=on-failure
+RestartSec=1

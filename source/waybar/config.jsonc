@@ -1,0 +1,136 @@
+{
+  "name": "main",
+  "layer": "top",
+  "position": "top",
+  "mode": "dock",
+  "exclusive": true,
+  "passthrough": false,
+  "fixed-center": true,
+  "height": 30,
+  "margin-top": 0,
+  "margin-left": 0,
+  "margin-right": 0,
+  "spacing": 0,
+  "on-sigusr1": "noop",
+  "on-sigusr2": "reload",
+  "modules-left": [
+    "custom/launcher",
+    "ext/workspaces",
+    "hyprland/window"
+  ],
+  "modules-center": [],
+  "modules-right": [
+    "mpris",
+    "custom/tray-drawer",
+    "custom/caffeinate",
+    "custom/network",
+    "custom/control-center",
+    "custom/clock",
+    "custom/power"
+  ],
+  "custom/launcher": {
+    "format": "󰣇",
+    "tooltip-format": "Applications\nRight-click: terminal",
+    "on-click": "fuzzel",
+    "on-click-right": "ghostty"
+  },
+  "ext/workspaces": {
+    "format": "{name}",
+    "on-click": "activate",
+    "sort-by-name": true,
+    "all-outputs": false,
+    "active-only": false,
+    "ignore-hidden": true
+  },
+  "hyprland/window": {
+    "format": "{title}",
+    "icon": true,
+    "icon-size": 13,
+    "max-length": 32,
+    "separate-outputs": true,
+    "rewrite": {
+      "(.*) — Mozilla Firefox": "$1",
+      "(.*) - Mozilla Firefox": "$1",
+      "(.*) — Chromium": "$1",
+      "(.*) - Chromium": "$1"
+    }
+  },
+  "mpris": {
+    "format": "{status_icon}  {dynamic}",
+    "format-playing": "{status_icon}  {dynamic}",
+    "format-paused": "{status_icon}  <i>{dynamic}</i>",
+    "format-stopped": "",
+    "dynamic-order": [
+      "title",
+      "artist"
+    ],
+    "dynamic-importance-order": [
+      "title",
+      "artist"
+    ],
+    "dynamic-len": 24,
+    "title-len": 20,
+    "artist-len": 16,
+    "album-len": 0,
+    "status-icons": {
+      "playing": "󰐊",
+      "paused": "󰏤",
+      "stopped": ""
+    },
+    "tooltip-format": "{player}\n{title}\n{artist}",
+    "enable-tooltip-len-limits": false
+  },
+  "custom/tray-drawer": {
+    "format": "󰅀",
+    "tooltip-format": "Managed applications",
+    "on-click": "/usr/bin/qs ipc -c hypr-rice call panels toggleTray"
+  },
+  "custom/caffeinate": {
+    "format": "{}",
+    "tooltip": true,
+    "return-type": "json",
+    "exec": "/home/cynric/.local/bin/hypr-rice-caffeinate status",
+    "interval": 2,
+    "on-click": "/home/cynric/.local/bin/hypr-rice-caffeinate toggle"
+  },
+  "custom/network": {
+    "format": "{}",
+    "return-type": "json",
+    "exec": "/home/cynric/.local/bin/hypr-rice-panel-data waybar-network",
+    "interval": 5,
+    "tooltip": true,
+    "on-click": "/usr/bin/qs ipc -c hypr-rice call panels togglePerformance"
+  },
+  "custom/control-center": {
+    "format": "󰒓",
+    "tooltip-format": "Control Center\nRight-click: Menu Bar Manager",
+    "on-click": "/usr/bin/qs ipc -c hypr-rice call panels toggleControl",
+    "on-click-right": "/usr/bin/qs ipc -c hypr-rice call panels toggleMenuBar"
+  },
+  "custom/clock": {
+    "return-type": "json",
+    "exec": "/home/cynric/.local/bin/hypr-rice-waybar-clock",
+    "restart-interval": 2,
+    "escape": false,
+    "on-click": "/usr/bin/qs ipc -c hypr-rice call panels toggleNotifications"
+  },
+  "custom/power": {
+    "format": "󰐥",
+    "tooltip-format": "Session menu\nRight-click: lock",
+    "on-click": "/home/cynric/.local/bin/hypr-rice-power-menu",
+    "on-click-right": "hyprlock"
+  },
+  "custom/weather": {
+    "format": "{}",
+    "return-type": "json",
+    "exec": "/home/cynric/.local/bin/hypr-rice-panel-data waybar-weather",
+    "interval": 900,
+    "tooltip": true,
+    "on-click": "/usr/bin/qs ipc -c hypr-rice call panels openControl weather"
+  },
+  "custom/microphone": {
+    "format": "󰍬",
+    "tooltip-format": "Microphone",
+    "on-click": "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
+  }
+}

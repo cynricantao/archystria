@@ -1,0 +1,9 @@
+[Unit]
+Description=Blueman tray applet
+PartOf=graphical-session.target
+After=graphical-session.target bluetooth.target
+
+[Service]
+ExecStart=/usr/bin/blueman-applet
+Restart=on-failure
+RestartSec=2

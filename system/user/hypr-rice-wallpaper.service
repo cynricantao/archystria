@@ -1,0 +1,10 @@
+[Unit]
+Description=Restore wallpaper and compile palette
+PartOf=graphical-session.target
+Requires=hypr-rice-awww.service
+After=hypr-rice-awww.service
+
+[Service]
+Type=oneshot
+Environment=HYPR_RICE_AWWW_MANAGED=1
+ExecStart=/home/cynric/.local/bin/hypr-rice-wallpaper --restore

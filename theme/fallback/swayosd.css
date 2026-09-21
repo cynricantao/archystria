@@ -1,0 +1,6 @@
+/* Generated palette; structural SwayOSD styling remains in style.css. */
+@define-color osd_bg #1f1f29;
+@define-color osd_border #464651;
+@define-color osd_fg #e3e1ef;
+@define-color osd_muted #c7c5d3;
+@define-color osd_accent #c0c1ff;

@@ -1,0 +1,37 @@
+━━ WINDOWS ━━
+Super + Q	Close focused window
+Super + F	Toggle fullscreen
+Super + Ctrl + F	Toggle maximize
+Super + Space	Toggle floating
+Super + Shift + arrows / HJK;	Move window by direction
+━━ WORKSPACES ━━
+Super + 1…0	Switch workspace 1…10
+Super + Shift + 1…0	Move window to workspace 1…10
+Super + S	Toggle scratchpad
+━━ APPS ━━
+Super	Application launcher
+Super + Enter	Open terminal
+Super + E	Open file manager
+Super + B	Open browser
+Super + V	Clipboard history
+Super + C	Calculator
+Super + Shift + F	File search
+Super + W	Web search
+Super + Shift + W	Wallpaper and palette
+━━ SYSTEM ━━
+Print	Region screenshot
+Ctrl + Print	Full screenshot
+Alt + Print	Active-window screenshot
+Super + L	Lock session
+Super + Escape	Power menu
+Super + N	Control center
+Super + Shift + N	Do Not Disturb
+Super + /	Shortcut viewer
+━━ NAVIGATION ━━
+Super + arrows / HJK;	Focus by direction
+Super + Tab	Focus next window
+Super + Shift + Tab	Focus previous window
+━━ MEDIA ━━
+Volume keys	Adjust or mute audio
+Mic mute	Toggle microphone mute
+Media keys	Playback control

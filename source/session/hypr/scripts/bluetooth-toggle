@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -u
+
+is_powered() {
+    timeout 3s bluetoothctl show 2>/dev/null | grep -q '^[[:space:]]*Powered: yes$'
+}
+
+case "${1:-toggle}" in
+    status)
+        if is_powered; then
+            printf 'true\n'
+        else
+            printf 'false\n'
+        fi
+        ;;
+    on|true)
+        if timeout 8s bluetoothctl power on >/dev/null 2>&1; then
+            notify-send -a "Bluetooth" -i bluetooth-active "Bluetooth enabled"
+        else
+            notify-send -u critical -a "Bluetooth" -i dialog-error "Could not enable Bluetooth"
+            exit 1
+        fi
+        ;;
+    off|false)
+        if timeout 8s bluetoothctl power off >/dev/null 2>&1; then
+            notify-send -a "Bluetooth" -i bluetooth-disabled "Bluetooth disabled"
+        else
+            notify-send -u critical -a "Bluetooth" -i dialog-error "Could not disable Bluetooth"
+            exit 1
+        fi
+        ;;
+    toggle)
+        if is_powered; then
+            exec "$0" off
+        else
+            exec "$0" on
+        fi
+        ;;
+    *)
+        printf 'Usage: %s [status|on|off|toggle|true|false]\n' "${0##*/}" >&2
+        exit 2
+        ;;
+esac

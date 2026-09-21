@@ -1,0 +1,20 @@
+module HyprRice
+singleton Theme 1.0 Theme.qml
+PanelButton 1.0 PanelButton.qml
+PanelSurface 1.0 PanelSurface.qml
+PanelHeader 1.0 PanelHeader.qml
+QuickTile 1.0 QuickTile.qml
+SectionLabel 1.0 SectionLabel.qml
+Sparkline 1.0 Sparkline.qml
+ShellSlider 1.0 ShellSlider.qml
+MediaCard 1.0 MediaCard.qml
+MetricCard 1.0 MetricCard.qml
+PerformanceNetwork 1.0 PerformanceNetwork.qml
+TrayDrawer 1.0 TrayDrawer.qml
+TrayItemRow 1.0 TrayItemRow.qml
+MenuBarManager 1.0 MenuBarManager.qml
+NotificationStore 1.0 NotificationStore.qml
+NotificationCard 1.0 NotificationCard.qml
+NotificationPopups 1.0 NotificationPopups.qml
+NotificationCenter 1.0 NotificationCenter.qml
+ControlCenter 1.0 ControlCenter.qml

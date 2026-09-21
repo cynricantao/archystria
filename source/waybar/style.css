@@ -1,0 +1,180 @@
+@import url("colors.css");
+@import url("ai-usage.css");
+
+* {
+  border: none;
+  border-radius: 0;
+  min-height: 0;
+  font-family: "Inter", "JetBrainsMono Nerd Font Propo", sans-serif;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+window#waybar {
+  color: @on_surface;
+  background-color: alpha(@surface_container, 0.82);
+  border-bottom: 1px solid alpha(@outline_variant, 0.48);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.modules-left,
+.modules-right {
+  padding: 0 6px;
+}
+
+#custom-launcher,
+#workspaces,
+#window,
+#mpris,
+#wireplumber,
+#custom-caffeinate,
+#custom-control-center,
+#custom-clock,
+#custom-power {
+  margin: 0 1px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: @on_surface_variant;
+  background-color: transparent;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+#custom-launcher:hover,
+#mpris:hover,
+#wireplumber:hover,
+#custom-caffeinate:hover,
+#custom-control-center:hover,
+#custom-clock:hover,
+#custom-power:hover {
+  color: @on_surface;
+  background-color: alpha(@surface_bright, 0.52);
+}
+
+/* Left: menu, workspaces, current title. */
+#custom-launcher {
+  min-width: 20px;
+  padding: 0 5px;
+  color: @primary;
+  background-color: transparent;
+  font-family: "JetBrainsMono Nerd Font Propo";
+  font-size: 15px;
+}
+
+#custom-launcher:hover {
+  color: @on_surface;
+}
+
+#workspaces {
+  padding: 0 2px;
+}
+
+#workspaces button {
+  min-width: 18px;
+  margin: 2px 1px;
+  padding: 0 5px;
+  color: alpha(@on_surface_variant, 0.78);
+  background-color: transparent;
+  border-radius: 6px;
+  box-shadow: none;
+  text-shadow: none;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+#workspaces button:hover {
+  color: @on_surface;
+  background-color: alpha(@surface_bright, 0.46);
+}
+
+#workspaces button.active {
+  color: @on_surface;
+  background-color: alpha(@surface_bright, 0.74);
+}
+
+#workspaces button.urgent {
+  color: @on_error_container;
+  background-color: alpha(@error_container, 0.88);
+}
+
+#workspaces button.hidden {
+  color: alpha(@on_surface_variant, 0.48);
+}
+
+#window {
+  padding-left: 5px;
+  color: alpha(@on_surface_variant, 0.84);
+  font-weight: 500;
+}
+
+window#waybar.empty #window {
+  padding: 0;
+  margin: 0;
+  opacity: 0;
+}
+
+/* Right: contextual media, volume, control center, time, session. */
+#mpris {
+  color: @on_surface_variant;
+  font-weight: 500;
+}
+
+#mpris.paused {
+  color: alpha(@on_surface_variant, 0.66);
+}
+
+#wireplumber.muted {
+  color: @outline;
+}
+
+#custom-caffeinate,
+#custom-control-center {
+  min-width: 18px;
+  padding: 0 5px;
+  font-family: "JetBrainsMono Nerd Font Propo";
+  font-size: 14px;
+}
+
+#custom-caffeinate {
+  color: @outline;
+}
+
+#custom-caffeinate.active,
+#custom-control-center {
+  color: @primary;
+}
+
+#custom-clock {
+  color: @on_surface;
+  background-color: transparent;
+  font-weight: 600;
+}
+
+#custom-clock.unread {
+  color: @on_surface;
+}
+
+#custom-power {
+  min-width: 18px;
+  padding: 0 5px;
+  color: @on_surface_variant;
+  background-color: transparent;
+  font-family: "JetBrainsMono Nerd Font Propo";
+  font-size: 14px;
+}
+
+#custom-power:hover {
+  color: @on_error_container;
+  background-color: alpha(@error_container, 0.74);
+}
+
+tooltip {
+  color: @on_surface;
+  background-color: alpha(@surface_container_high, 0.98);
+  border: 1px solid @outline_variant;
+  border-radius: 9px;
+}
+
+tooltip label {
+  padding: 7px 9px;
+  color: @on_surface;
+}

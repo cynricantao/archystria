@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Atomically generate and reload the managed Waybar configuration."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any
+
+HOME = Path(os.environ.get("HOME", str(Path.home())))
+SHELL_CONFIG = Path(os.environ.get("HYPR_SHELL_CONFIG_DIR", HOME / ".config/hypr-shell"))
+WAYBAR_CONFIG = Path(os.environ.get("HYPR_WAYBAR_CONFIG_DIR", HOME / ".config/waybar"))
+PROJECT = Path(os.environ.get("HYPR_RICE_PROJECT", HOME / ".local/share/hypr-rice"))
+SETTINGS_PATH = SHELL_CONFIG / "settings.json"
+BASE_PATH = Path(os.environ.get("HYPR_WAYBAR_BASE", PROJECT / "source/waybar/config.base.json"))
+OUTPUT_PATH = WAYBAR_CONFIG / "config.jsonc"
+STYLE_SETTINGS_PATH = WAYBAR_CONFIG / "settings.css"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "hypr-shell"
+LAST_GOOD = STATE_DIR / "waybar-config.last-good.json"
+
+MODULES: dict[str, str] = {
+    "activeApp": "hyprland/window",
+    "media": "mpris",
+    "tray": "custom/tray-drawer",
+    "caffeinate": "custom/caffeinate",
+    "network": "custom/network",
+    "controlCenter": "custom/control-center",
+    "clock": "custom/clock",
+    "power": "custom/power",
+    "weather": "custom/weather",
+    "microphone": "custom/microphone",
+}
+CORE_LEFT = ["custom/launcher", "ext/workspaces"]
+LOCKED = {"launcher", "workspaces", "clock", "controlCenter"}
+DEFAULT_RIGHT_ORDER = [
+    "media", "tray", "caffeinate", "network", "controlCenter", "clock", "power"
+]
+DENSITY = {
+    "compact": {"padding": 5, "margin": 1, "traySpacing": 5},
+    "normal": {"padding": 7, "margin": 2, "traySpacing": 7},
+    "relaxed": {"padding": 9, "margin": 3, "traySpacing": 9},
+}
+
+
+def default_settings() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "dnd": False,
+        "weather": {
+            "location": "Dubai",
+            "latitude": 25.2048,
+            "longitude": 55.2708,
+            "timezone": "Asia/Dubai",
+        },
+        "menuBar": {
+            "density": "compact",
+            "modules": {
+                "activeApp": True,
+                "media": False,
+                "tray": True,
+                "caffeinate": True,
+                "network": True,
+                "controlCenter": True,
+                "clock": True,
+                "power": True,
+                "weather": False,
+                "microphone": False,
+            },
+            "rightOrder": list(DEFAULT_RIGHT_ORDER),
+            "trayHidden": [],
+        },
+    }
+
+
+def merged_settings(raw: object) -> dict[str, Any]:
+    settings = default_settings()
+    if not isinstance(raw, dict):
+        return settings
+    for key in ("version", "dnd"):
+        if key in raw:
+            settings[key] = raw[key]
+    if isinstance(raw.get("weather"), dict):
+        settings["weather"].update(raw["weather"])
+    menu = raw.get("menuBar")
+    if isinstance(menu, dict):
+        if menu.get("density") in DENSITY:
+            settings["menuBar"]["density"] = menu["density"]
+        modules = menu.get("modules")
+        if isinstance(modules, dict):
+            for key in MODULES:
+                if key in modules:
+                    settings["menuBar"]["modules"][key] = bool(modules[key])
+        order = menu.get("rightOrder")
+        if isinstance(order, list):
+            clean = [item for item in order if item in MODULES and item != "activeApp"]
+            clean += [item for item in DEFAULT_RIGHT_ORDER if item not in clean]
+            settings["menuBar"]["rightOrder"] = clean
+        hidden = menu.get("trayHidden")
+        if isinstance(hidden, list):
+            settings["menuBar"]["trayHidden"] = sorted(
+                {str(item) for item in hidden if str(item).strip()}
+            )
+    # Mandatory affordances cannot disappear through a normal toggle.
+    settings["menuBar"]["modules"]["clock"] = True
+    settings["menuBar"]["modules"]["controlCenter"] = True
+    return settings
+
+
+def load_settings() -> dict[str, Any]:
+    try:
+        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    return merged_settings(raw)
+
+
+def atomic_text(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, mode)
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def validate_settings(settings: dict[str, Any]) -> None:
+    menu = settings["menuBar"]
+    if menu["density"] not in DENSITY:
+        raise ValueError("invalid menu-bar density")
+    if not menu["modules"]["clock"] or not menu["modules"]["controlCenter"]:
+        raise ValueError("mandatory menu-bar module disabled")
+    order = menu["rightOrder"]
+    if len(order) != len(set(order)):
+        raise ValueError("duplicate menu-bar module order entry")
+
+
+def build_config(settings: dict[str, Any]) -> dict[str, Any]:
+    try:
+        base = json.loads(BASE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid Waybar base configuration: {exc}") from exc
+    config = copy.deepcopy(base)
+    enabled = settings["menuBar"]["modules"]
+    left = list(CORE_LEFT)
+    if enabled.get("activeApp", True):
+        left.append(MODULES["activeApp"])
+    right = [
+        MODULES[item]
+        for item in settings["menuBar"]["rightOrder"]
+        if item in MODULES and item != "activeApp" and enabled.get(item, False)
+    ]
+    for required in ("custom/control-center", "custom/clock"):
+        if required not in right:
+            right.append(required)
+    # AI usage is a persistent affordance, independent of optional menu modules.
+    if "custom/ai-usage" in config and "custom/ai-usage" not in right:
+        index = right.index("custom/control-center") if "custom/control-center" in right else 0
+        right.insert(index, "custom/ai-usage")
+    config["modules-left"] = left
+    config["modules-center"] = []
+    config["modules-right"] = right
+    if config.get("position") != "top" or config.get("margin-top") != 0:
+        raise ValueError("managed Waybar must remain top-anchored with zero top margin")
+    if int(config.get("height", 99)) > 31:
+        raise ValueError("managed Waybar height exceeds the thin-bar contract")
+    for module in CORE_LEFT + ["custom/control-center", "custom/clock"]:
+        if module not in left + right:
+            raise ValueError(f"missing mandatory module: {module}")
+    return config
+
+
+def style_fragment(settings: dict[str, Any]) -> str:
+    values = DENSITY[settings["menuBar"]["density"]]
+    selectors = ",\n".join(
+        f"#{MODULES[key].replace('custom/', 'custom-').replace('/', '-')}"
+        for key in MODULES
+        if key not in {"activeApp", "tray"}
+    )
+    return (
+        "/* Generated atomically by hypr-rice-waybar-manager. */\n"
+        f"{selectors} {{ margin-left: {values['margin']}px; margin-right: {values['margin']}px; }}\n"
+        f"#tray {{ padding-left: {values['traySpacing']}px; padding-right: {values['traySpacing']}px; }}\n"
+    )
+
+
+def write_transaction(settings: dict[str, Any]) -> None:
+    validate_settings(settings)
+    config = build_config(settings)
+    settings_text = json.dumps(settings, indent=2, sort_keys=True) + "\n"
+    config_text = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+    # Parse the exact serialized payloads before replacing either live file.
+    json.loads(settings_text)
+    json.loads(config_text)
+    if OUTPUT_PATH.exists():
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(OUTPUT_PATH, LAST_GOOD)
+    atomic_text(SETTINGS_PATH, settings_text)
+    atomic_text(OUTPUT_PATH, config_text)
+    atomic_text(STYLE_SETTINGS_PATH, style_fragment(settings))
+
+
+def waybar_pid() -> int:
+    result = subprocess.run(
+        ["systemctl", "--user", "show", "-p", "MainPID", "--value", "waybar.service"],
+        text=True,
+        capture_output=True,
+        timeout=3,
+        check=False,
+    )
+    try:
+        return int(result.stdout.strip()) if result.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
+def reload_waybar() -> None:
+    if os.environ.get("HYPR_WAYBAR_NO_RELOAD") == "1":
+        return
+    # Waybar 0.15.0 can crash a reload child when the SNI tray is active.
+    # systemd restart is a single-instance, ordered stop/start and is the stable
+    # supported path on this machine.
+    result = subprocess.run(
+        ["systemctl", "--user", "restart", "waybar.service"],
+        timeout=10,
+        check=False,
+    )
+    time.sleep(0.5)
+    if result.returncode == 0 and waybar_pid() > 1:
+        return
+    if LAST_GOOD.exists():
+        atomic_text(OUTPUT_PATH, LAST_GOOD.read_text(encoding="utf-8"))
+    recovery = subprocess.run(
+        ["systemctl", "--user", "restart", "waybar.service"],
+        timeout=10,
+        check=False,
+    )
+    if recovery.returncode != 0 or waybar_pid() <= 1:
+        raise RuntimeError("Waybar restart failed; last-known-good config was restored")
+    raise RuntimeError("Waybar rejected the new config; last-known-good config was restored")
+
+
+def persist(settings: dict[str, Any]) -> None:
+    write_transaction(merged_settings(settings))
+    reload_waybar()
+
+
+def set_module(settings: dict[str, Any], module: str, enabled: bool) -> None:
+    if module not in MODULES:
+        raise ValueError(f"unknown module: {module}")
+    if module in {"clock", "controlCenter"} and not enabled:
+        raise ValueError(f"{module} is locked on")
+    settings["menuBar"]["modules"][module] = enabled
+
+
+def move(settings: dict[str, Any], module: str, direction: str) -> None:
+    if module not in MODULES or module == "activeApp":
+        raise ValueError(f"module cannot be reordered: {module}")
+    order = settings["menuBar"]["rightOrder"]
+    if module not in order:
+        order.append(module)
+    index = order.index(module)
+    target = index - 1 if direction == "up" else index + 1
+    if 0 <= target < len(order):
+        order[index], order[target] = order[target], order[index]
+
+
+def set_tray_hidden(settings: dict[str, Any], item_id: str, hidden: bool) -> None:
+    item_id = item_id.strip()
+    if not item_id or len(item_id) > 512 or "\n" in item_id:
+        raise ValueError("invalid tray item id")
+    current = set(settings["menuBar"].get("trayHidden", []))
+    if hidden:
+        current.add(item_id)
+    else:
+        current.discard(item_id)
+    settings["menuBar"]["trayHidden"] = sorted(current)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("init")
+    commands.add_parser("apply")
+    commands.add_parser("show")
+    module = commands.add_parser("module")
+    module.add_argument("name", choices=sorted(MODULES))
+    module.add_argument("state", choices=("on", "off"))
+    reorder = commands.add_parser("move")
+    reorder.add_argument("name", choices=sorted(set(MODULES) - {"activeApp"}))
+    reorder.add_argument("direction", choices=("up", "down"))
+    density = commands.add_parser("density")
+    density.add_argument("value", choices=sorted(DENSITY))
+    tray = commands.add_parser("tray")
+    tray.add_argument("item_id")
+    tray.add_argument("state", choices=("hide", "show"))
+    args = parser.parse_args()
+    settings = load_settings()
+    try:
+        if args.command == "show":
+            print(json.dumps(settings, indent=2, sort_keys=True))
+            return 0
+        if args.command == "module":
+            set_module(settings, args.name, args.state == "on")
+        elif args.command == "move":
+            move(settings, args.name, args.direction)
+        elif args.command == "density":
+            settings["menuBar"]["density"] = args.value
+        elif args.command == "tray":
+            set_tray_hidden(settings, args.item_id, args.state == "hide")
+            normalized = merged_settings(settings)
+            validate_settings(normalized)
+            atomic_text(SETTINGS_PATH, json.dumps(normalized, indent=2, sort_keys=True) + "\n")
+            print(json.dumps(load_settings(), separators=(",", ":")))
+            return 0
+        persist(settings)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(load_settings(), separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

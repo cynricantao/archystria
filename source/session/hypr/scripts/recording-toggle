@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -u
+
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+state_file="$runtime_dir/hypr-rice-recording.state"
+lock_file="$runtime_dir/hypr-rice-recording.lock"
+log_file="$runtime_dir/hypr-rice-recording.log"
+
+exec 9>"$lock_file"
+flock 9
+
+recording_pid=""
+recording_file=""
+read_state() {
+    [[ -r "$state_file" ]] || return 1
+    {
+        IFS= read -r recording_pid
+        IFS= read -r recording_file
+    } < "$state_file"
+    [[ "$recording_pid" =~ ^[0-9]+$ ]] || return 1
+    [[ -r "/proc/$recording_pid/comm" ]] || return 1
+    local process_name=""
+    IFS= read -r process_name < "/proc/$recording_pid/comm"
+    [[ "$process_name" == "wf-recorder" ]] || return 1
+    kill -0 "$recording_pid" 2>/dev/null
+}
+
+status() {
+    if read_state; then
+        printf 'true\n'
+    else
+        rm -f -- "$state_file"
+        printf 'false\n'
+    fi
+}
+
+stop_recording() {
+    if ! read_state; then
+        rm -f -- "$state_file"
+        notify-send -a "Screen recorder" -i media-record "No managed recording is running"
+        return 0
+    fi
+
+    kill -INT "$recording_pid" 2>/dev/null || true
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        kill -0 "$recording_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+
+    if kill -0 "$recording_pid" 2>/dev/null; then
+        notify-send -u critical -a "Screen recorder" -i dialog-error "Recorder did not stop cleanly" "PID $recording_pid"
+        return 1
+    fi
+
+    rm -f -- "$state_file"
+    notify-send -a "Screen recorder" -i media-playback-stop "Recording saved" "$recording_file"
+    printf '%s\n' "$recording_file"
+}
+
+start_recording() {
+    local mode="${1:-region}"
+    local geometry=""
+    local videos=""
+    local out_dir=""
+    local out=""
+    local -a args=()
+
+    if read_state; then
+        notify-send -u critical -a "Screen recorder" -i dialog-warning "A managed recording is already running"
+        return 1
+    fi
+    rm -f -- "$state_file"
+
+    case "$mode" in
+        region)
+            geometry="$(slurp -b '#0b0f1488' -c '#f7768eff' -s '#f7768e44' -w 2)" || return 0
+            [[ -n "$geometry" ]] || return 0
+            args+=(--geometry "$geometry")
+            ;;
+        active)
+            geometry="$(hyprctl -j activewindow 2>/dev/null | jq -er '
+                select(.address != null and .address != "0x")
+                | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"
+            ' 2>/dev/null)" || {
+                notify-send -u critical -a "Screen recorder" -i dialog-error "No active window to record"
+                return 1
+            }
+            args+=(--geometry "$geometry")
+            ;;
+        full)
+            ;;
+        *)
+            printf 'Usage: %s [toggle [region|full|active]|start [region|full|active]|stop|status]\n' "${0##*/}" >&2
+            return 2
+            ;;
+    esac
+
+    videos="$(xdg-user-dir VIDEOS 2>/dev/null || true)"
+    [[ -n "$videos" ]] || videos="$HOME/Videos"
+    out_dir="$videos/Screencasts"
+    if ! mkdir -p -- "$out_dir"; then
+        notify-send -u critical -a "Screen recorder" -i dialog-error "Could not create recording directory" "$out_dir"
+        return 1
+    fi
+    out="$out_dir/$(date +'%Y-%m-%d_%H-%M-%S')_${mode}.mp4"
+
+    setsid wf-recorder "${args[@]}" --file "$out" 9>&- >"$log_file" 2>&1 &
+    recording_pid=$!
+    sleep 0.25
+    if ! kill -0 "$recording_pid" 2>/dev/null; then
+        notify-send -u critical -a "Screen recorder" -i dialog-error "Could not start recording" "See $log_file"
+        return 1
+    fi
+
+    printf '%s\n%s\n' "$recording_pid" "$out" > "$state_file"
+    notify-send -a "Screen recorder" -i media-record "Recording started" "$mode capture — run the toggle again to stop"
+}
+
+command="${1:-toggle}"
+case "$command" in
+    status)
+        status
+        ;;
+    stop)
+        stop_recording
+        ;;
+    start)
+        start_recording "${2:-region}"
+        ;;
+    toggle)
+        if read_state; then
+            stop_recording
+        else
+            rm -f -- "$state_file"
+            start_recording "${2:-region}"
+        fi
+        ;;
+    *)
+        printf 'Usage: %s [toggle [region|full|active]|start [region|full|active]|stop|status]\n' "${0##*/}" >&2
+        exit 2
+        ;;
+esac

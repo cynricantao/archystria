@@ -1,0 +1,10 @@
+/* Generated palette; structural SwayNC styling remains in style.css. */
+@define-color bg #12121c;
+@define-color panel #1f1f29;
+@define-color panel_alt #292934;
+@define-color border #464651;
+@define-color text #e3e1ef;
+@define-color muted #c7c5d3;
+@define-color accent #c0c1ff;
+@define-color accent_soft alpha(#c0c1ff, 0.24);
+@define-color urgent #ffb4ab;

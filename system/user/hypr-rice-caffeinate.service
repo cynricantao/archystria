@@ -1,0 +1,18 @@
+[Unit]
+Description=Hypr Rice user-requested idle and sleep inhibition
+PartOf=hypr-rice-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/systemd-inhibit --what=idle:sleep --who=hypr-rice --why=User-requested-caffeinate --mode=block /usr/bin/sleep infinity
+Restart=no
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+
+# Intentionally no [Install] section: this transient preference is controlled
+# by caffeinate.sh and should not be enabled persistently.

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -u
+
+action="${1:-}"
+
+case "$action" in
+    lock)
+        if pidof hyprlock >/dev/null 2>&1; then
+            exit 0
+        fi
+        exec hyprlock
+        ;;
+    suspend)
+        title="Suspend"
+        question="Suspend this computer?"
+        confirm_label="Suspend"
+        icon="system-suspend"
+        ;;
+    logout)
+        title="Log out"
+        question="End this Hyprland session?"
+        confirm_label="Log out"
+        icon="system-log-out"
+        ;;
+    reboot)
+        title="Restart"
+        question="Restart this computer?"
+        confirm_label="Restart"
+        icon="system-reboot"
+        ;;
+    poweroff)
+        title="Shut down"
+        question="Shut down this computer?"
+        confirm_label="Shut down"
+        icon="system-shutdown"
+        ;;
+    *)
+        printf 'Usage: %s [lock|suspend|logout|reboot|poweroff]\n' "${0##*/}" >&2
+        exit 2
+        ;;
+esac
+
+# Actions are only executed after an explicit notification action. Opening the
+# control center keeps confirmation reachable when Do Not Disturb is enabled.
+( sleep 0.15; swaync-client --open-panel --skip-wait >/dev/null 2>&1 || true ) &
+choice="$(notify-send \
+    --urgency=critical \
+    --app-name="Session" \
+    --icon="$icon" \
+    --action="confirm=$confirm_label" \
+    --action="cancel=Cancel" \
+    "$title" "$question" 2>/dev/null || true)"
+
+[[ "$choice" == "confirm" ]] || exit 0
+
+case "$action" in
+    suspend)
+        exec systemctl suspend
+        ;;
+    logout)
+        exec hyprctl dispatch exit
+        ;;
+    reboot)
+        exec systemctl reboot
+        ;;
+    poweroff)
+        exec systemctl poweroff
+        ;;
+esac

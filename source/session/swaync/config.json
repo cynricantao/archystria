@@ -1,0 +1,154 @@
+{
+  "$schema": "/etc/xdg/swaync/configSchema.json",
+  "ignore-gtk-theme": true,
+  "positionX": "right",
+  "positionY": "top",
+  "layer": "overlay",
+  "control-center-layer": "overlay",
+  "layer-shell": true,
+  "layer-shell-cover-screen": true,
+  "cssPriority": "user",
+  "control-center-exclusive-zone": false,
+  "control-center-margin-top": 10,
+  "control-center-margin-bottom": 10,
+  "control-center-margin-right": 10,
+  "control-center-margin-left": 10,
+  "notification-2fa-action": true,
+  "notification-inline-replies": true,
+  "notification-body-image-height": 120,
+  "notification-body-image-width": 240,
+  "timeout": 7,
+  "timeout-low": 4,
+  "timeout-critical": 0,
+  "fit-to-screen": true,
+  "relative-timestamps": true,
+  "control-center-width": 440,
+  "notification-window-width": 420,
+  "keyboard-shortcuts": true,
+  "notification-grouping": true,
+  "image-visibility": "when-available",
+  "transition-time": 180,
+  "hide-on-clear": false,
+  "hide-on-action": true,
+  "text-empty": "No notifications",
+  "script-fail-notify": true,
+  "widgets": [
+    "title",
+    "dnd",
+    "menubar",
+    "buttons-grid",
+    "volume",
+    "mpris",
+    "inhibitors",
+    "notifications"
+  ],
+  "widget-config": {
+    "title": {
+      "text": "Notifications",
+      "clear-all-button": true,
+      "button-text": "Clear all"
+    },
+    "dnd": {
+      "text": "Do not disturb"
+    },
+    "menubar": {
+      "menu#session": {
+        "label": "Session",
+        "position": "right",
+        "animation-type": "slide_down",
+        "animation-duration": 180,
+        "actions": [
+          {
+            "label": "Lock",
+            "command": "/home/cynric/.config/hypr/scripts/session-action lock"
+          },
+          {
+            "label": "Suspend…",
+            "command": "/home/cynric/.config/hypr/scripts/session-action suspend"
+          },
+          {
+            "label": "Log out…",
+            "command": "/home/cynric/.config/hypr/scripts/session-action logout"
+          },
+          {
+            "label": "Restart…",
+            "command": "/home/cynric/.config/hypr/scripts/session-action reboot"
+          },
+          {
+            "label": "Shut down…",
+            "command": "/home/cynric/.config/hypr/scripts/session-action poweroff"
+          }
+        ]
+      }
+    },
+    "buttons-grid": {
+      "buttons-per-row": 4,
+      "actions": [
+        {
+          "label": "Bluetooth",
+          "type": "toggle",
+          "active": false,
+          "command": "sh -c '/home/cynric/.config/hypr/scripts/bluetooth-toggle \"$SWAYNC_TOGGLE_STATE\"'",
+          "update-command": "/home/cynric/.config/hypr/scripts/bluetooth-toggle status"
+        },
+        {
+          "label": "BT devices",
+          "command": "blueman-manager"
+        },
+        {
+          "label": "Network",
+          "command": "nm-connection-editor"
+        },
+        {
+          "label": "Audio",
+          "command": "pavucontrol"
+        },
+        {
+          "label": "Region shot",
+          "command": "/home/cynric/.config/hypr/scripts/screenshot region"
+        },
+        {
+          "label": "Full shot",
+          "command": "/home/cynric/.config/hypr/scripts/screenshot full"
+        },
+        {
+          "label": "Active shot",
+          "command": "/home/cynric/.config/hypr/scripts/screenshot active"
+        },
+        {
+          "label": "Record region",
+          "type": "toggle",
+          "active": false,
+          "command": "/home/cynric/.config/hypr/scripts/recording-toggle toggle region",
+          "update-command": "/home/cynric/.config/hypr/scripts/recording-toggle status"
+        }
+      ]
+    },
+    "volume": {
+      "label": "Volume",
+      "show-per-app": true,
+      "show-per-app-icon": true,
+      "show-per-app-label": true,
+      "expand-per-app": false,
+      "empty-list-label": "No active audio streams",
+      "animation-type": "slide_down",
+      "animation-duration": 180
+    },
+    "mpris": {
+      "blacklist": [
+        "playerctld"
+      ],
+      "autohide": true,
+      "show-album-art": "when-available",
+      "loop-carousel": false
+    },
+    "inhibitors": {
+      "text": "Notification inhibitors",
+      "button-text": "Clear all",
+      "clear-all-button": true
+    },
+    "notifications": {
+      "vexpand": true
+    }
+  }
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Hypr rice graphical session
+Requires=graphical-session.target
+After=graphical-session.target
+Wants=pipewire.service pipewire-pulse.service wireplumber.service gnome-keyring-daemon.socket
+Wants=waybar.service hypr-rice-quickshell.service hypridle.service hyprpolkitagent.service cliphist.service
+Wants=hypr-rice-awww.service hypr-rice-swayosd.service hypr-rice-wallpaper.service
+
+[Install]
+WantedBy=default.target

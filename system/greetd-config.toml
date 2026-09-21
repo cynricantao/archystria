@@ -1,0 +1,6 @@
+[terminal]
+vt = 1
+
+[default_session]
+command = "tuigreet --time --time-format '%A · %d %B · %H:%M' --remember --remember-session --asterisks --greeting 'ARCH // HYPRLAND' --cmd start-hyprland"
+user = "greeter"
